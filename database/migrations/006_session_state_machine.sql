@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS session_state_history (
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     from_state session_state NOT NULL,
     to_state session_state NOT NULL,
-    changed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    changed_by UUID REFERENCES wl_users(id) ON DELETE SET NULL,
     reason TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

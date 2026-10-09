@@ -754,7 +754,7 @@ SELECT
     s.name as session_name,
     s.start_time as session_start_time,
     a.id as athlete_id,
-    a.best_snatch,
+    a.best_snatch as athlete_best_snatch,
     a.best_clean_and_jerk,
     a.total as competition_total,
     a.rank as competition_rank,
