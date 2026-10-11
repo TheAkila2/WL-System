@@ -132,7 +132,7 @@ export const getAthlete = async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from('athletes')
-      .select('*')
+      .select('*, team:teams(*)')
       .eq('id', req.params.id)
       .single();
 

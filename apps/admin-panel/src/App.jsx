@@ -10,7 +10,9 @@ import Athletes from './pages/Athletes';
 import Sessions from './pages/Sessions';
 import TechnicalPanel from './pages/TechnicalPanel';
 import VenueScreen from './pages/VenueScreen';
-import VenueDisplay from './pages/VenueDisplay';
+import IntroView from './pages/venue-display/IntroView';
+import ScoreboardView from './pages/venue-display/ScoreboardView';
+import ResultsView from './pages/venue-display/ResultsView';
 import Teams from './pages/Teams';
 import WeighIn from './pages/WeighIn';
 import UserManagement from './pages/UserManagement';
@@ -26,9 +28,29 @@ const router = createBrowserRouter(
     },
     {
       path: '/venue-display/:sessionId',
+      element: <Navigate to="scoreboard" replace />,
+    },
+    {
+      path: '/venue-display/:sessionId/intro',
       element: (
         <ProtectedRoute roles={['admin', 'technical']}>
-          <VenueDisplay />
+          <IntroView />
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: '/venue-display/:sessionId/scoreboard',
+      element: (
+        <ProtectedRoute roles={['admin', 'technical']}>
+          <ScoreboardView />
+        </ProtectedRoute>
+      ),
+    },
+    {
+      path: '/venue-display/:sessionId/results',
+      element: (
+        <ProtectedRoute roles={['admin', 'technical']}>
+          <ResultsView />
         </ProtectedRoute>
       ),
     },

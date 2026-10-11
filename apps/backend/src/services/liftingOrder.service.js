@@ -1,4 +1,4 @@
-import db from '../services/database.js';
+import { supabase as db } from '../services/database.js';
 import { getCurrentEffectiveWeight } from './weightChange.service.js';
 
 function parseWeightCategoryValue(weightCategory) {
@@ -79,7 +79,7 @@ export async function calculateLiftingOrder(sessionId, liftType = 'snatch') {
       const athleteAttempts = (attempts || []).filter(a => a.athlete_id === athlete.id);
       
       // Find next attempt to take
-      const completedAttempts = athleteAttempts.filter(a => a.result !== null);
+      const completedAttempts = athleteAttempts.filter(a => a.result !== 'pending');
       const nextAttemptNumber = completedAttempts.length + 1; // 1, 2, or 3
       
       // If all 3 attempts done, exclude from order
@@ -97,7 +97,7 @@ export async function calculateLiftingOrder(sessionId, liftType = 'snatch') {
         requestedWeight = changedWeight || (liftType === 'snatch' 
           ? athlete.opening_snatch 
           : athlete.opening_clean_jerk);
-      } else if (lastAttempt?.result === 'success') {
+      } else if (lastAttempt?.result === 'good') {
         // If last attempt succeeded, check for weight change request
         const changedWeight = await getCurrentEffectiveWeight(athlete.id, liftType);
         // If there's a weight change, use it; otherwise default to last weight + 1kg

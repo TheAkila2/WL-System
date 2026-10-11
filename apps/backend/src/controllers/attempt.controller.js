@@ -1,4 +1,4 @@
-import db from '../services/database.js';
+import db, { supabase } from '../services/database.js';
 import { AppError } from '../middleware/errorHandler.js';
 
 export const getAttempts = async (req, res, next) => {
@@ -81,6 +81,28 @@ export const validateAttempt = async (req, res, next) => {
 
     // Emit socket event
     req.app.get('io').emit('attempt:validated', attempt);
+
+    // If this attempt belonged to the athlete currently "called to platform",
+    // clear the call so the live display drops back to the scoreboard view.
+    if (attempt.session_id && attempt.athlete_id) {
+      const { data: clearedSession, error: clearError } = await supabase
+        .from('sessions')
+        .update({
+          current_call_athlete_id: null,
+          current_call_lift_type: null,
+          current_call_attempt_number: null,
+          current_call_weight: null,
+          current_call_at: null,
+        })
+        .eq('id', attempt.session_id)
+        .eq('current_call_athlete_id', attempt.athlete_id)
+        .select()
+        .maybeSingle();
+
+      if (!clearError && clearedSession) {
+        req.app.get('io').emit('athlete:call:cleared', { session_id: attempt.session_id });
+      }
+    }
 
     res.status(200).json({
       success: true,

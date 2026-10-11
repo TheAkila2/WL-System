@@ -23,7 +23,7 @@ export const AuthProvider = ({ children }) => {
         if (authService.isAuthenticated()) {
           const currentUser = authService.getCurrentUser();
           setUser(currentUser);
-          
+
           // Verify token is still valid
           try {
             await authService.getMe();
@@ -31,12 +31,27 @@ export const AuthProvider = ({ children }) => {
             // Token invalid, clear auth
             authService.logout();
             setUser(null);
+            if (import.meta.env.DEV) await autoLoginDev();
           }
+        } else if (import.meta.env.DEV) {
+          // Local dev only: skip the login screen entirely by signing in
+          // automatically with the seeded test admin account. Production
+          // builds (import.meta.env.DEV === false) never take this path.
+          await autoLoginDev();
         }
       } catch (error) {
         console.error('Auth check failed:', error);
       } finally {
         setLoading(false);
+      }
+    };
+
+    const autoLoginDev = async () => {
+      try {
+        const response = await authService.login('admin@test.com', 'password123');
+        setUser(response.data.user);
+      } catch (error) {
+        console.error('Dev auto-login failed:', error);
       }
     };
 

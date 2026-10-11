@@ -4,13 +4,14 @@ import api from '../../services/api';
 import toast from 'react-hot-toast';
 import AttemptCell from './AttemptCell';
 import socketService from '../../services/socket';
+import { supabase } from '../../services/supabaseClient';
 import CompetitionTimer from './CompetitionTimer';
 import WeighInModal from './WeighInModal';
 import PhaseControlButtons from './PhaseControlButtons';
 
 const ENABLE_SYSTEM_RECOMMENDATION = true;
 
-export default function SessionSheet({ session: initialSession, onBack, onToggleFullscreen, isFullscreen }) {
+export default function SessionSheet({ session: initialSession, onBack, onToggleFullscreen, isFullscreen, browserFullscreen, readOnly = false }) {
   const [athletes, setAthletes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -34,7 +35,7 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
   const tableWrapperRef = useRef(null);
   const tableRef = useRef(null);
 
-  const recommendationsOn = ENABLE_SYSTEM_RECOMMENDATION && recommendationEnabled;
+  const recommendationsOn = !readOnly && ENABLE_SYSTEM_RECOMMENDATION && recommendationEnabled;
 
   const sessionId = session?.id;
 
@@ -310,12 +311,14 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
   }, [nextLifter]);
 
   // Load session data
-  const fetchSessionData = useCallback(async () => {
+  const fetchSessionData = useCallback(async ({ silent = false } = {}) => {
     if (!sessionId) return;
-    
+
     try {
-      setLoading(true);
-      setError(null);
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
       
       console.log('🔄 Fetching session data for sessionId:', sessionId);
       
@@ -334,7 +337,7 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
       // Validate that we got data - if empty, keep existing data
       if (!athletesData || athletesData.length === 0) {
         console.warn('⚠️ API returned empty athletes data, keeping existing data');
-        setLoading(false);
+        if (!silent) setLoading(false);
         return;
       }
       
@@ -385,12 +388,117 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
       
     } catch (error) {
       console.error('❌ Error fetching session data:', error);
-      setError(error.message || 'Failed to load session data');
-      toast.error('Failed to load session data');
+      if (!silent) {
+        setError(error.message || 'Failed to load session data');
+        toast.error('Failed to load session data');
+      }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionId, recommendationsOn]);
+
+  // Auto-refresh for read-only display screens (e.g. the Scoreboard venue display),
+  // since SessionSheet otherwise only refetches in response to local user actions.
+  // Scoped to readOnly so the Technical Panel's live editing is never interrupted
+  // by a background refetch resetting focus/in-progress input.
+  useEffect(() => {
+    if (!readOnly || !sessionId) return;
+
+    const interval = setInterval(() => fetchSessionData({ silent: true }), 3000);
+
+    const channel = supabase
+      .channel(`sheet-readonly-${sessionId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'attempts', filter: `session_id=eq.${sessionId}` },
+        () => fetchSessionData({ silent: true })
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'athletes', filter: `session_id=eq.${sessionId}` },
+        () => fetchSessionData({ silent: true })
+      )
+      .subscribe();
+
+    return () => {
+      clearInterval(interval);
+      supabase.removeChannel(channel);
+    };
+  }, [readOnly, sessionId, fetchSessionData]);
+
+  // Small "called to platform" clock for the Technical Panel's fullscreen header —
+  // mirrors the Intro screen's countdown so the operator can see remaining time
+  // without switching to the venue display.
+  const [callClock, setCallClock] = useState(null); // { athleteName, calledAt, durationSeconds }
+  const [callTimeRemaining, setCallTimeRemaining] = useState(null);
+
+  const applyCallClock = useCallback(async (sessionRow) => {
+    if (!sessionRow?.current_call_athlete_id) {
+      setCallClock(null);
+      return;
+    }
+    try {
+      const res = await api.get(`/athletes/${sessionRow.current_call_athlete_id}`);
+      setCallClock({
+        athleteName: res.data.data?.name || 'Athlete',
+        calledAt: sessionRow.current_call_at,
+        durationSeconds: sessionRow.current_call_duration_seconds || 60,
+      });
+    } catch (err) {
+      console.error('Failed to load called athlete for clock:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (readOnly || !sessionId) return;
+
+    api.get(`/sessions/${sessionId}`).then((res) => applyCallClock(res.data.data)).catch(() => {});
+
+    const channel = supabase
+      .channel(`sheet-callclock-${sessionId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` },
+        (payload) => applyCallClock(payload.new)
+      )
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  }, [readOnly, sessionId, applyCallClock]);
+
+  useEffect(() => {
+    if (!callClock?.calledAt) {
+      setCallTimeRemaining(null);
+      return;
+    }
+    const calledAtMs = new Date(callClock.calledAt).getTime();
+    const tick = () => {
+      const elapsed = (Date.now() - calledAtMs) / 1000;
+      setCallTimeRemaining(Math.max(0, Math.ceil(callClock.durationSeconds - elapsed)));
+    };
+    tick();
+    const interval = setInterval(tick, 250);
+    return () => clearInterval(interval);
+  }, [callClock]);
+
+  const callClockBadge = !readOnly && callClock && callTimeRemaining !== null && (
+    <div
+      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg border text-xs sm:text-sm font-mono font-bold tabular-nums ${
+        callTimeRemaining === 0 || callTimeRemaining <= 10
+          ? 'bg-red-50 dark:bg-red-950 border-red-300 dark:border-red-600 text-red-600 dark:text-red-400 animate-pulse'
+          : 'bg-slate-50 dark:bg-zinc-800 border-slate-300 dark:border-zinc-600 text-slate-700 dark:text-zinc-200'
+      }`}
+      title={`${callClock.athleteName} — called to platform`}
+    >
+      <Timer size={12} className="sm:w-3.5 sm:h-3.5 shrink-0" />
+      <span className="hidden sm:inline truncate max-w-[120px]">{callClock.athleteName}</span>
+      <span>
+        {callTimeRemaining === 0
+          ? 'TIME'
+          : `${Math.floor(callTimeRemaining / 60)}:${String(callTimeRemaining % 60).padStart(2, '0')}`}
+      </span>
+    </div>
+  );
 
   // Handle attempt update (from AttemptCell)
   const handleAttemptUpdate = async (attemptData) => {
@@ -447,27 +555,49 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
           lift_type: attemptData.lift_type,
           attempt_number: attemptData.attempt_number,
           weight: attemptData.weight || attemptData.requested_weight,
-          result: attemptData.result || 'pending'
-          // edit_count removed to prevent potential 500 errors if backend table doesn't have it
+          result: attemptData.result || 'pending',
+          edit_count: attemptData.edit_count ?? 0,
         };
 
         console.log('📡 Sending to backend immediately:', payload);
         setSaving(true);
 
+        let savedAttempt;
         if (attemptData.id) {
           // Update existing attempt
           const response = await api.put(`/attempts/${attemptData.id}`, payload);
           console.log('✅ Attempt updated:', response.data);
+          savedAttempt = response.data?.data;
           setLastSaved(new Date());
           // toast.success('✓ Saved'); // Hidden to reduce notification noise
         } else {
           // Create new attempt
           const response = await api.post('/attempts', payload);
           console.log('✅ Attempt created:', response.data);
+          savedAttempt = response.data?.data;
           setLastSaved(new Date());
           // toast.success('✓ Saved'); // Hidden to reduce notification noise
         }
-        
+
+        // Merge the server's response (critically: its real `id`) back into local
+        // state. Without this, a newly-created attempt never gets an `id` locally,
+        // so editing the same cell again would try to CREATE it a second time
+        // instead of updating it - and fail with a duplicate-key error.
+        if (savedAttempt?.id) {
+          setAthletes(prev => prev.map(athlete => {
+            if (athlete.id !== attemptData.athlete_id) return athlete;
+            return {
+              ...athlete,
+              attempts: athlete.attempts?.map(a =>
+                a.lift_type === attemptData.lift_type && a.attempt_number === attemptData.attempt_number
+                  ? { ...a, ...savedAttempt }
+                  : a
+              ) || [],
+            };
+          }));
+        }
+
+
         // Emit socket update to notify other users (but not ourselves)
         socketService.emit('sheet:update', {
           sessionId,
@@ -482,8 +612,15 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
         console.error('Error response:', error.response?.data);
         console.error('Error status:', error.response?.status);
         console.error('Error message:', error.message);
-        // toast.error('⚠️ Failed to save - ' + (error.response?.data?.message || error.message || 'Retry'));
-        // DO NOT refresh - data is already optimistically updated
+        // The screen still shows the optimistic value, but it was NOT saved to
+        // the database. Without this, a reload (or anyone else's screen) silently
+        // reverts to the old value with no indication anything went wrong.
+        toast.error('Failed to save attempt - ' + (error.response?.data?.message || error.message || 'please retry'), { duration: 6000 });
+        // Rethrow so the caller (AttemptCell) knows the save actually failed and
+        // doesn't go on to show its own misleading "Weight updated" success toast.
+        // Marked so the outer catch below doesn't show a second, duplicate toast.
+        error._alreadyShownToast = true;
+        throw error;
       } finally {
         setSaving(false);
       }
@@ -493,8 +630,55 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
 
     } catch (error) {
       console.error('❌ Error updating attempt:', error);
-      toast.error('Failed to update attempt');
+      if (!error._alreadyShownToast) {
+        toast.error('Failed to update attempt');
+      }
       setSaving(false);
+    }
+  };
+
+  // Determine an athlete's next pending attempt, so "Call to Platform" can be
+  // triggered right from the sheet without going to the separate Venue Screen
+  // page. Each athlete progresses through snatch -> clean & jerk independently
+  // (not tied to the session's overall current_lift), so this checks whether
+  // THIS athlete has already judged all 3 snatch attempts before deciding
+  // which lift type to look at.
+  const getNextAttemptForAthlete = (athlete) => {
+    const attempts = athlete.attempts || [];
+    const snatchJudged = attempts.filter(
+      a => a.lift_type === 'snatch' && (a.result === 'good' || a.result === 'no-lift')
+    ).length;
+    const liftType = snatchJudged < 3 ? 'snatch' : 'clean_and_jerk';
+
+    const liftAttempts = attempts.filter(a => a.lift_type === liftType);
+    for (let num = 1; num <= 3; num++) {
+      const existing = liftAttempts.find(a => a.attempt_number === num);
+      if (!existing || existing.result === 'pending') {
+        const weight = existing?.weight || existing?.requested_weight ||
+          (liftType === 'snatch' ? athlete.opening_snatch : athlete.opening_clean_jerk);
+        return { liftType, attemptNumber: num, weight };
+      }
+    }
+    return null; // all 3 attempts for both lifts are already judged
+  };
+
+  const handleCallToPlatform = async (athlete) => {
+    const next = getNextAttemptForAthlete(athlete);
+    if (!next || !next.weight) {
+      toast.error(`${athlete.name} has no declared weight for their next attempt`);
+      return;
+    }
+    try {
+      await api.post(`/sessions/${sessionId}/call-athlete`, {
+        athleteId: athlete.id,
+        liftType: next.liftType,
+        attemptNumber: next.attemptNumber,
+        weight: next.weight,
+      });
+      toast.success(`${athlete.name} called to platform`);
+    } catch (error) {
+      console.error('❌ Error calling athlete to platform:', error);
+      toast.error('Failed to call athlete to platform');
     }
   };
 
@@ -725,8 +909,50 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
     });
   };
 
+  // Broadcast-style dark header row for the readOnly scoreboard display,
+  // vs. the Technical Panel's light editing-focused header.
+  // Inline styles (not Tailwind classes) for the header colors specifically -
+  // guarantees the background/text color actually renders regardless of any
+  // CSS generation/specificity quirks, since inline style always wins.
+  const theadRowClass = readOnly ? 'h-[52px]' : 'bg-gray-200 dark:bg-gray-800 h-[52px]';
+  const theadRowStyle = readOnly ? { backgroundColor: '#1e1b4b' } : undefined;
+  const thClass = readOnly
+    ? 'p-3 text-center text-sm font-bold uppercase tracking-wide border'
+    : 'p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600';
+  const thClassLeft = readOnly
+    ? 'p-3 text-left text-sm font-bold uppercase tracking-wide border'
+    : 'p-3 text-left text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600';
+  const thSubClass = readOnly
+    ? 'p-2 text-sm font-bold border'
+    : 'p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600';
+  const thStyle = readOnly ? { backgroundColor: '#1e1b4b', color: '#ffffff', borderColor: '#3730a3' } : undefined;
+  const thSubStyle = readOnly ? { backgroundColor: '#312e81', color: '#ffffff', borderColor: '#3730a3' } : undefined;
+
   return (
-    <div className={`${isFullscreen ? 'h-screen w-screen overflow-hidden flex flex-col min-h-0' : 'min-h-screen'} bg-slate-100 dark:bg-zinc-900 ${isFullscreen ? 'p-0' : 'p-2'}`}>
+    <div className={`${isFullscreen ? 'h-screen w-screen overflow-hidden flex flex-col min-h-0' : 'min-h-screen'} ${readOnly && isFullscreen ? 'bg-slate-950' : 'bg-slate-100 dark:bg-zinc-900'} ${isFullscreen ? 'p-0' : 'p-2'}`}>
+      {readOnly && (
+        <style>{`
+          /* Borderless broadcast-style grid: color and spacing separate cells
+             instead of grid lines, matching the reference scoreboard design. */
+          .scoreboard-display-table, .scoreboard-display-table th, .scoreboard-display-table td {
+            border: none !important;
+          }
+          .scoreboard-display-table thead tr:first-child th {
+            border-bottom: 2px solid #0a2730 !important;
+          }
+          .scoreboard-display-table thead tr:last-child th {
+            border-bottom: 2px solid #0a2730 !important;
+          }
+          .scoreboard-display-table tbody tr {
+            border-bottom: 1px solid #e2e8f0 !important;
+          }
+          .scoreboard-display-table td {
+            padding-top: 0.5rem !important;
+            padding-bottom: 0.5rem !important;
+            height: 52px !important;
+          }
+        `}</style>
+      )}
       {/* Header - Hidden in fullscreen */}
       {!isFullscreen && (
       <div className="bg-white dark:bg-zinc-800 rounded-lg shadow-lg p-2 sm:p-3 md:p-4 mb-2 sm:mb-3">
@@ -813,47 +1039,77 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
 
       {/* Fullscreen Header - Show only in fullscreen mode */}
       {isFullscreen && (
-        <div className="bg-white dark:bg-zinc-800 shadow-md p-2 sm:p-3 md:p-4 flex items-center justify-between gap-4 border-b border-slate-200 dark:border-zinc-700 relative">
-          <div className="flex flex-col gap-0.5 min-w-0 flex-1 z-10">
-            <h2 className="text-xs sm:text-sm text-slate-600 dark:text-zinc-400 truncate">
-              {session?.competition?.name || 'Competition'}
-            </h2>
-            <h1 className="text-lg sm:text-xl md:text-2xl lg:text-3xl font-bold text-slate-900 dark:text-white truncate">
-              {session?.name || 'Session'}
-            </h1>
-          </div>
-
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none hidden md:block z-0">
-            <img src="/lifting-social-logo.svg" alt="Lifting Social" className="h-14 sm:h-20" />
-          </div>
-
-          {/* Timer in fullscreen header (Temporarily commented out for space) */}
-          {/*
-          {nextLifter && (
-            <div className="flex items-center gap-3 px-2 sm:px-3 md:px-4 py-2 sm:py-2.5 md:py-3 whitespace-nowrap z-10">
-              <CompetitionTimer
-                key={timerKey}
-                duration={timerDuration}
-                isRunning={timerRunning}
-                onStart={() => setTimerRunning(true)}
-                onPause={() => setTimerRunning(false)}
-                onReset={() => {
-                  setTimerRunning(false);
-                  setTimerKey(prev => prev + 1);
-                }}
-                compact={true}
+        <div
+          className={
+            readOnly
+              ? 'shadow-lg py-3 px-4 sm:px-6 flex items-center justify-between gap-4 relative'
+              : 'bg-white dark:bg-zinc-800 shadow-md p-2 sm:p-3 md:p-4 flex items-center justify-between gap-4 border-b border-slate-200 dark:border-zinc-700 relative'
+          }
+          style={readOnly ? {
+            background: 'linear-gradient(to bottom, #0c3b47, #082933)',
+          } : undefined}
+        >
+          {readOnly && session?.competition?.logo_url ? (
+            <div className="hidden md:flex items-center justify-center z-10 shrink-0 bg-white rounded-full shadow-md w-14 h-14 sm:w-16 sm:h-16 p-1.5">
+              <img
+                src={session.competition.logo_url}
+                alt="Event Logo"
+                className="max-w-full max-h-full object-contain"
               />
             </div>
+          ) : readOnly ? (
+            <div className="hidden md:block w-14 sm:w-16 shrink-0" />
+          ) : null}
+
+          <div className={`flex flex-col gap-0.5 min-w-0 flex-1 z-10 ${readOnly ? 'items-center text-center' : ''}`}>
+            {readOnly ? (
+              <>
+                <h2 className="text-xs sm:text-sm font-bold tracking-[0.15em] uppercase truncate" style={{ color: '#9fd8e3' }}>
+                  {session?.competition?.name || 'Competition'}
+                </h2>
+                <h1 className="text-lg sm:text-xl lg:text-2xl font-black uppercase tracking-wide truncate" style={{ color: '#ffffff' }}>
+                  Scoreboard - {session?.name || 'Session'}
+                </h1>
+              </>
+            ) : (
+              <>
+                <h2 className="text-xs sm:text-sm text-slate-600 dark:text-zinc-400 truncate">
+                  {session?.competition?.name || 'Competition'}
+                </h2>
+                <h1 className="text-lg sm:text-xl md:text-2xl lg:text-3xl font-bold text-slate-900 dark:text-white truncate">
+                  {session?.name || 'Session'}
+                </h1>
+              </>
+            )}
+          </div>
+
+          <div className={
+            readOnly
+              ? 'hidden md:flex items-center justify-center z-10 shrink-0 bg-white rounded-full shadow-md w-16 h-16 sm:w-20 sm:h-20 p-2'
+              : 'hidden md:flex items-center z-0 shrink-0 pointer-events-none'
+          }>
+            <img
+              src="/lifting-social-logo.svg"
+              alt="Lifting Social"
+              className={readOnly ? 'max-w-full max-h-full object-contain' : 'h-14 sm:h-20'}
+            />
+          </div>
+
+          {!readOnly && callClockBadge && (
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20">
+              {callClockBadge}
+            </div>
           )}
-          */}
-          <button
-            onClick={onToggleFullscreen}
-            className="fixed bottom-3 sm:bottom-4 right-3 sm:right-4 z-50 flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg transition-colors text-xs sm:text-sm font-medium"
-            title="Exit fullscreen"
-          >
-            <Minimize2 size={14} className="sm:w-4 sm:h-4" />
-            <span className="hidden xs:inline">Exit</span>
-          </button>
+          {!readOnly && (
+            <button
+              onClick={onToggleFullscreen}
+              className="fixed bottom-3 sm:bottom-4 right-3 sm:right-4 z-50 flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg transition-colors text-xs sm:text-sm font-medium"
+              title="Exit fullscreen"
+            >
+              <Minimize2 size={14} className="sm:w-4 sm:h-4" />
+              <span className="hidden xs:inline">Exit</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -915,7 +1171,7 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
       )}
 
       {/* Spreadsheet Sheet - Optimized for fullscreen */}
-      <div className={`bg-white dark:bg-zinc-900 ${isFullscreen ? 'rounded-none shadow-none p-1 sm:p-2 flex-1 overflow-hidden flex flex-col min-h-0 relative' : 'rounded-lg shadow-lg p-2 sm:p-3'}`}>
+      <div className={`${readOnly && isFullscreen ? 'bg-slate-950' : 'bg-white dark:bg-zinc-900'} ${isFullscreen ? 'rounded-none shadow-none p-1 sm:p-2 flex-1 overflow-hidden flex flex-col min-h-0 relative' : 'rounded-lg shadow-lg p-2 sm:p-3'}`}>
         {!isFullscreen && (
         <div className="flex items-center justify-between mb-2 sm:mb-3">
           <div className="min-w-0">
@@ -931,16 +1187,27 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
         </div>
         )}
 
-        {/* Fullscreen Exit Button - Bottom Right (only in fullscreen) */}
+        {/* Fullscreen Toggle Button - Bottom Right (only in fullscreen) */}
         {isFullscreen && (
-          <button
-            onClick={onToggleFullscreen}
-            className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg transition-colors text-sm font-medium"
-            title="Exit fullscreen"
-          >
-            <Minimize2 size={16} />
-            Exit
-          </button>
+          readOnly ? (
+            <button
+              onClick={onToggleFullscreen}
+              className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors text-sm font-medium opacity-0 hover:opacity-100 focus:opacity-100"
+              title={browserFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            >
+              {browserFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+              {browserFullscreen ? 'Exit' : 'Full Screen'}
+            </button>
+          ) : (
+            <button
+              onClick={onToggleFullscreen}
+              className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg transition-colors text-sm font-medium"
+              title="Exit fullscreen"
+            >
+              <Minimize2 size={16} />
+              Exit
+            </button>
+          )
         )}
 
         {/* Loading/Error States */}
@@ -966,62 +1233,98 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
           >
             <table
               ref={tableRef}
-              className={`w-full border-collapse bg-white dark:bg-zinc-900 table-fixed border-2 border-gray-400 dark:border-gray-600`}
+              className={`w-full border-collapse bg-white dark:bg-zinc-900 table-fixed border-2 border-gray-400 dark:border-gray-600 ${readOnly ? 'scoreboard-display-table' : ''}`}
               style={isFullscreen ? {
                 transform: `scale(${tableScale})`,
                 transformOrigin: 'top left',
                 width: tableScale < 1 ? `${100 / tableScale}%` : '100%'
               } : undefined}
             >
-              <colgroup>
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '80px' }} />
-                <col style={{ width: '160px' }} />
-                <col style={{ width: '100px' }} />
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '80px' }} />
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '80px' }} />
-                <col style={{ width: '80px' }} />
-                <col style={{ width: '70px' }} />
-                <col style={{ width: '60px' }} />
-              </colgroup>
+              {readOnly ? (
+                <colgroup>
+                  <col style={{ width: '32%' }} />
+                  <col style={{ width: '6%' }} />
+                  <col style={{ width: '6%' }} />
+                  <col style={{ width: '6%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '6%' }} />
+                  <col style={{ width: '6%' }} />
+                  <col style={{ width: '6%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '5%' }} />
+                </colgroup>
+              ) : (
+                <colgroup>
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '80px' }} />
+                  <col style={{ width: '160px' }} />
+                  <col style={{ width: '100px' }} />
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '80px' }} />
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '80px' }} />
+                  <col style={{ width: '80px' }} />
+                  <col style={{ width: '70px' }} />
+                  <col style={{ width: '60px' }} />
+                </colgroup>
+              )}
               <thead>
-                <tr className="bg-gray-200 dark:bg-gray-800 h-[52px]">
-                  <th rowSpan="2" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">Lot #</th>
-                  <th rowSpan="2" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">Order</th>
-                  <th rowSpan="2" className="p-3 text-left text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">Name</th>
-                  <th rowSpan="2" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">Team</th>
-                  <th colSpan="4" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">
-                    SNATCH
-                  </th>
-                  <th colSpan="4" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">
-                    CLEAN & JERK
-                  </th>
-                  <th rowSpan="2" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">
-                    TOTAL
-                  </th>
-                  <th rowSpan="2" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">
-                    RANK
-                  </th>
-                  <th rowSpan="2" className="p-3 text-center text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">
-                    DQ
-                  </th>
-                </tr>
-                <tr className="bg-gray-200 dark:bg-gray-800 h-[40px]">
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">1</th>
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">2</th>
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">3</th>
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">Best</th>
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">1</th>
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">2</th>
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">3</th>
-                  <th className="p-2 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">Best</th>
-                </tr>
+                {readOnly ? (
+                  getAthletesGroupedByClass().sortedClasses.length <= 1 && (
+                    <tr className={theadRowClass} style={theadRowStyle}>
+                      <th className={thClassLeft} style={thStyle}></th>
+                      <th className={thClass} style={thStyle}>1</th>
+                      <th className={thClass} style={thStyle}>2</th>
+                      <th className={thClass} style={thStyle}>3</th>
+                      <th className={thClass} style={thStyle}>Best</th>
+                      <th className={thClass} style={thStyle}>1</th>
+                      <th className={thClass} style={thStyle}>2</th>
+                      <th className={thClass} style={thStyle}>3</th>
+                      <th className={thClass} style={thStyle}>Best</th>
+                      <th className={thClass} style={thStyle}>TOTAL</th>
+                      <th className={thClass} style={thStyle}>RANK</th>
+                    </tr>
+                  )
+                ) : (
+                  <>
+                    <tr className={theadRowClass} style={theadRowStyle}>
+                      <th rowSpan="2" className={thClass} style={thStyle}>Lot #</th>
+                      <th rowSpan="2" className={thClass} style={thStyle}>Order</th>
+                      <th rowSpan="2" className={thClassLeft} style={thStyle}>Name</th>
+                      <th rowSpan="2" className={thClass} style={thStyle}>Team</th>
+                      <th colSpan="4" className={thClass} style={thStyle}>
+                        SNATCH
+                      </th>
+                      <th colSpan="4" className={thClass} style={thStyle}>
+                        CLEAN & JERK
+                      </th>
+                      <th rowSpan="2" className={thClass} style={thStyle}>
+                        TOTAL
+                      </th>
+                      <th rowSpan="2" className={thClass} style={thStyle}>
+                        RANK
+                      </th>
+                      <th rowSpan="2" className={thClass} style={thStyle}>
+                        DQ
+                      </th>
+                    </tr>
+                    <tr className="bg-gray-200 dark:bg-gray-800 h-[40px]">
+                      <th className={thSubClass} style={thSubStyle}>1</th>
+                      <th className={thSubClass} style={thSubStyle}>2</th>
+                      <th className={thSubClass} style={thSubStyle}>3</th>
+                      <th className={thSubClass} style={thSubStyle}>Best</th>
+                      <th className={thSubClass} style={thSubStyle}>1</th>
+                      <th className={thSubClass} style={thSubStyle}>2</th>
+                      <th className={thSubClass} style={thSubStyle}>3</th>
+                      <th className={thSubClass} style={thSubStyle}>Best</th>
+                    </tr>
+                  </>
+                )}
               </thead>
               <tbody>
                 {(() => {
@@ -1032,11 +1335,29 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
                     <React.Fragment key={weightClass}>
                       {/* Weight Class Section Header - Only show for multiple classes */}
                       {sortedClasses.length > 1 && (
-                      <tr className="h-11 bg-black bg-opacity-10 dark:bg-black dark:bg-opacity-20 border-2 border-gray-400 dark:border-gray-600">
-                        <td colSpan="15" className="p-3 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">
-                          {weightClass}kg Weight Class 
-                        </td>
-                      </tr>
+                        readOnly ? (
+                          <tr className={theadRowClass} style={theadRowStyle}>
+                            <th className="px-3 text-left text-sm font-black uppercase tracking-wide" style={thStyle}>
+                              {weightClass}kg Weight Class
+                            </th>
+                            <th className={thClass} style={thStyle}>1</th>
+                            <th className={thClass} style={thStyle}>2</th>
+                            <th className={thClass} style={thStyle}>3</th>
+                            <th className={thClass} style={thStyle}>Best</th>
+                            <th className={thClass} style={thStyle}>1</th>
+                            <th className={thClass} style={thStyle}>2</th>
+                            <th className={thClass} style={thStyle}>3</th>
+                            <th className={thClass} style={thStyle}>Best</th>
+                            <th className={thClass} style={thStyle}>TOTAL</th>
+                            <th className={thClass} style={thStyle}>RANK</th>
+                          </tr>
+                        ) : (
+                          <tr className="h-11 bg-black bg-opacity-10 dark:bg-black dark:bg-opacity-20 border-2 border-gray-400 dark:border-gray-600">
+                            <td colSpan="15" className="p-3 text-sm font-bold text-black dark:text-white border-2 border-gray-400 dark:border-gray-600">
+                              {weightClass}kg Weight Class
+                            </td>
+                          </tr>
+                        )
                       )}
                       
                       {/* Athletes in this weight class */}
@@ -1047,38 +1368,63 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
                           <tr 
                             key={athlete.id} 
                             className={`${isFullscreen ? 'h-auto' : 'h-[52px]'} bg-white dark:bg-zinc-900 hover:bg-gray-50 dark:hover:bg-zinc-800 border-b border-gray-300 dark:border-gray-700 overflow-hidden`}>
-                            <td className="p-1 text-sm text-center text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600">
-                              <input
-                                type="number"
-                                className="w-full h-8 text-center bg-white dark:bg-zinc-800 border-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                value={athlete.lot_number ?? ''}
-                                min="1"
-                                onChange={(e) => {
-                                  const val = e.target.value === '' ? null : parseInt(e.target.value, 10);
-                                  handleAthleteMetaUpdate(athlete.id, { lot_number: val });
-                                }}
-                              />
-                            </td>
-                            <td className="p-1 text-sm text-center text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600">
-                              <input
-                                type="number"
-                                className="w-full h-8 text-center bg-white dark:bg-zinc-800 border-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                value={athlete.start_number ?? ''}
-                                min="1"
-                                onChange={(e) => {
-                                  const val = e.target.value === '' ? null : parseInt(e.target.value, 10);
-                                  handleAthleteMetaUpdate(athlete.id, { start_number: val });
-                                }}
-                              />
-                            </td>
-                            <td className="p-2 text-sm font-semibold text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600">
-                              <span className="truncate block">{athlete.name}</span>
-                            
-                            </td>
-                            <td className="p-2 text-sm text-center text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600">
-                              {getAthleteTeamCode(athlete)}
-                            </td>
-                            
+                            {readOnly ? (
+                              <td className="p-0 relative">
+                                <div className="h-full flex items-center justify-between gap-2 bg-slate-50 dark:bg-zinc-800 rounded-md px-3" style={{ margin: '4px' }}>
+                                  <span className="truncate font-semibold text-black dark:text-white">
+                                    <span className="text-slate-400 dark:text-zinc-500 font-normal mr-2">{athlete.lot_number ?? '-'}</span>
+                                    {athlete.name}
+                                  </span>
+                                  <span className="shrink-0 text-xs font-bold text-slate-500 dark:text-zinc-400 uppercase">
+                                    ({getAthleteTeamCode(athlete)})
+                                  </span>
+                                </div>
+                              </td>
+                            ) : (
+                              <>
+                                <td className="p-1 text-sm text-center text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600">
+                                  <input
+                                    type="number"
+                                    className="w-full h-8 text-center bg-white dark:bg-zinc-800 border-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                    value={athlete.lot_number ?? ''}
+                                    min="1"
+                                    onChange={(e) => {
+                                      const val = e.target.value === '' ? null : parseInt(e.target.value, 10);
+                                      handleAthleteMetaUpdate(athlete.id, { lot_number: val });
+                                    }}
+                                  />
+                                </td>
+                                <td className="p-1 text-sm text-center text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600">
+                                  <input
+                                    type="number"
+                                    className="w-full h-8 text-center bg-white dark:bg-zinc-800 border-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                    value={athlete.start_number ?? ''}
+                                    min="1"
+                                    onChange={(e) => {
+                                      const val = e.target.value === '' ? null : parseInt(e.target.value, 10);
+                                      handleAthleteMetaUpdate(athlete.id, { start_number: val });
+                                    }}
+                                  />
+                                </td>
+                                <td className="p-2 text-sm font-semibold text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600 relative group">
+                                  <span className="truncate block">{athlete.name}</span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleCallToPlatform(athlete);
+                                    }}
+                                    className="hidden group-hover:flex absolute inset-y-0 right-1 my-auto h-6 items-center px-2 bg-red-600 hover:bg-red-700 text-white text-[11px] font-bold uppercase tracking-wide rounded shadow-md transition-colors"
+                                    title="Call this athlete to the platform"
+                                  >
+                                    Call
+                                  </button>
+                                </td>
+                                <td className="p-2 text-sm text-center text-black dark:text-white border-2 border-r border-gray-400 dark:border-gray-600">
+                                  {getAthleteTeamCode(athlete)}
+                                </td>
+                              </>
+                            )}
+
                             {/* Snatch Attempts */}
                             {[1, 2, 3].map(attemptNum => (
                               <td key={`snatch-${attemptNum}`} className="border-2 border-r border-gray-400 dark:border-gray-600 p-0 relative h-[52px]">
@@ -1092,6 +1438,7 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
                                     forceEditMode={forceEditMode}
                                     isDQ={athlete.is_dq}
                                     nextLifter={recommendationsOn ? nextLifter : null}
+                                    readOnly={readOnly}
                                   />
                                 </div>
                               </td>
@@ -1115,6 +1462,7 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
                                     forceEditMode={forceEditMode}
                                     isDQ={athlete.is_dq}
                                     nextLifter={recommendationsOn ? nextLifter : null}
+                                    readOnly={readOnly}
                                   />
                                 </div>
                               </td>
@@ -1143,19 +1491,21 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
                               ) : '-'}
                             </td>
 
-                            {/* DQ */}
-                            <td className={`border-2 border-gray-400 dark:border-gray-600 p-0 relative ${isFullscreen ? '' : 'h-[52px]'} `}>
-                              <div className="w-full h-full relative flex items-center justify-center overflow-hidden">
-                                <input
-                                  type="checkbox"
-                                  checked={athlete.is_dq || false}
-                                  onChange={(e) => {
-                                    handleDQToggle(athlete.id, e.target.checked);
-                                  }}
-                                  className="w-5 h-5 cursor-pointer accent-gray-400"
-                                />
-                              </div>
-                            </td>
+                            {/* DQ - Technical Panel only */}
+                            {!readOnly && (
+                              <td className={`border-2 border-gray-400 dark:border-gray-600 p-0 relative ${isFullscreen ? '' : 'h-[52px]'} `}>
+                                <div className="w-full h-full relative flex items-center justify-center overflow-hidden">
+                                  <input
+                                    type="checkbox"
+                                    checked={athlete.is_dq || false}
+                                    onChange={(e) => {
+                                      handleDQToggle(athlete.id, e.target.checked);
+                                    }}
+                                    className="w-5 h-5 cursor-pointer accent-gray-400"
+                                  />
+                                </div>
+                              </td>
+                            )}
                           </tr>
                         );
                       })}

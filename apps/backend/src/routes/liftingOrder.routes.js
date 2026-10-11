@@ -17,8 +17,8 @@ router.get(
       const { sessionId } = req.params;
       const { liftType = 'snatch' } = req.query;
 
-      if (!['snatch', 'clean_jerk'].includes(liftType)) {
-        throw new AppError('Invalid lift type. Must be "snatch" or "clean_jerk"', 400);
+      if (!['snatch', 'clean_and_jerk'].includes(liftType)) {
+        throw new AppError('Invalid lift type. Must be "snatch" or "clean_and_jerk"', 400);
       }
 
       const positions = await liftingOrderService.getCurrentLiftingPositions(
@@ -49,8 +49,8 @@ router.get(
       const { sessionId } = req.params;
       const { liftType = 'snatch' } = req.query;
 
-      if (!['snatch', 'clean_jerk'].includes(liftType)) {
-        throw new AppError('Invalid lift type. Must be "snatch" or "clean_jerk"', 400);
+      if (!['snatch', 'clean_and_jerk'].includes(liftType)) {
+        throw new AppError('Invalid lift type. Must be "snatch" or "clean_and_jerk"', 400);
       }
 
       const order = await liftingOrderService.calculateLiftingOrder(

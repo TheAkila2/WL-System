@@ -439,3 +439,128 @@ export const getSessionAthletes = async (req, res, next) => {
   }
 };
 
+/**
+ * Call an athlete to the platform for an upcoming attempt (live display intro screen)
+ * POST /api/sessions/:id/call-athlete
+ */
+export const callAthleteToStage = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { athleteId, liftType, attemptNumber, weight } = req.body;
+
+    if (!athleteId || !liftType || !attemptNumber || !weight) {
+      throw new AppError('athleteId, liftType, attemptNumber, and weight are required', 400);
+    }
+
+    // IWF clock rule: 1 minute by default, 2 minutes if this athlete is taking
+    // back-to-back attempts (the last completed attempt in the session was theirs too).
+    const { data: lastAttempt } = await supabase
+      .from('attempts')
+      .select('athlete_id')
+      .eq('session_id', id)
+      .in('result', ['good', 'no-lift'])
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const durationSeconds = lastAttempt?.athlete_id === athleteId ? 120 : 60;
+
+    const { data: session, error: sessionError } = await supabase
+      .from('sessions')
+      .update({
+        current_call_athlete_id: athleteId,
+        current_call_lift_type: liftType,
+        current_call_attempt_number: attemptNumber,
+        current_call_weight: weight,
+        current_call_at: new Date().toISOString(),
+        current_call_duration_seconds: durationSeconds,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (sessionError) throw new AppError(sessionError.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    const { data: athlete, error: athleteError } = await supabase
+      .from('athletes')
+      .select(`
+        id,
+        name,
+        country,
+        weight_category,
+        photo_url,
+        team_id,
+        teams ( name, logo_url )
+      `)
+      .eq('id', athleteId)
+      .single();
+
+    if (athleteError) throw new AppError(athleteError.message, 400);
+    if (!athlete) throw new AppError('Athlete not found', 404);
+
+    const payload = {
+      session_id: id,
+      session_name: session.name,
+      session_number: session.session_number,
+      athlete_id: athlete.id,
+      athlete_name: athlete.name,
+      country: athlete.country,
+      weight_category: athlete.weight_category,
+      photo_url: athlete.photo_url,
+      team_name: athlete.teams?.name || null,
+      team_logo: athlete.teams?.logo_url || null,
+      lift_type: liftType,
+      attempt_number: attemptNumber,
+      weight,
+      called_at: session.current_call_at,
+      duration_seconds: durationSeconds,
+    };
+
+    req.app.get('io').emit('athlete:called', payload);
+
+    res.status(200).json({
+      success: true,
+      data: payload,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Clear the current platform call for a session (back to scoreboard view)
+ * POST /api/sessions/:id/clear-call
+ */
+export const clearAthleteCall = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({
+        current_call_athlete_id: null,
+        current_call_lift_type: null,
+        current_call_attempt_number: null,
+        current_call_weight: null,
+        current_call_at: null,
+        current_call_duration_seconds: null,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    req.app.get('io').emit('athlete:call:cleared', { session_id: id });
+
+    res.status(200).json({
+      success: true,
+      data: session,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+

@@ -19,6 +19,7 @@ export default function Competitions() {
     preliminary_entry_open: false,
     final_entry_open: false,
     image_url: '',
+    logo_url: '',
   });
 
   useEffect(() => {
@@ -46,6 +47,7 @@ export default function Competitions() {
           preliminary_entry_open: data.preliminary_entry_open || false,
           final_entry_open: data.final_entry_open || false,
           image_url: data.image_url || '',
+          logo_url: data.logo_url || '',
         });
       } else {
         // No competition exists, enable editing mode to create one
@@ -81,6 +83,7 @@ export default function Competitions() {
         description: formData.description,
         status: formData.status,
         image_url: formData.image_url,
+        logo_url: formData.logo_url,
       };
 
       console.log('📝 Form data:', JSON.parse(JSON.stringify(formData)));
@@ -161,6 +164,7 @@ export default function Competitions() {
         preliminary_entry_open: competition.preliminary_entry_open || false,
         final_entry_open: competition.final_entry_open || false,
         image_url: competition.image_url || '',
+        logo_url: competition.logo_url || '',
       });
       setEditing(false);
     }
@@ -358,7 +362,59 @@ export default function Competitions() {
                 />
               </div>
             </div>
-            
+
+            {/* Event Logo Upload - shown alongside the platform logo on venue display screens */}
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-zinc-300 mb-2">
+                Event Logo
+              </label>
+              <p className="text-xs text-slate-500 dark:text-zinc-500 mb-2">
+                Shown in the corner of the live scoreboard screen, alongside the platform logo.
+              </p>
+              <div className="space-y-2">
+                {formData.logo_url && (
+                  <div className="relative inline-block">
+                    <img
+                      src={formData.logo_url}
+                      alt="Event Logo"
+                      className="h-32 w-auto rounded-lg border border-slate-200 dark:border-zinc-700 object-contain bg-white p-2"
+                    />
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        if (formData.logo_url && formData.logo_url.includes('supabase')) {
+                          const urlParts = formData.logo_url.split('/');
+                          const pathIndex = urlParts.findIndex(part => part === 'competitions');
+                          if (pathIndex !== -1) {
+                            const path = urlParts.slice(pathIndex + 1).join('/');
+                            api.delete('/uploads/competitions/delete-image', {
+                              data: { path }
+                            }).catch(err => console.warn('Could not delete from server:', err));
+                          }
+                        }
+                        setFormData({ ...formData, logo_url: '' });
+                      }}
+                      className="absolute -top-2 -right-2 p-1 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors"
+                      title="Remove logo"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+                <ImageUpload
+                  currentImageUrl={formData.logo_url}
+                  uploadEndpoint="/uploads/competitions/upload-image"
+                  onUploadSuccess={(data) => {
+                    setFormData({ ...formData, logo_url: data.url });
+                    toast.success('Logo uploaded successfully');
+                  }}
+                  label="Upload Event Logo"
+                  maxSizeMB={5}
+                />
+              </div>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-slate-700 dark:text-zinc-300 mb-2">
                 Status

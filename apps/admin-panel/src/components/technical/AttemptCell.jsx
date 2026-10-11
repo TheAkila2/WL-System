@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { Check, X, SkipForward, Edit2 } from 'lucide-react';
+import { Check, X, SkipForward, Edit2, RotateCcw } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpdate, previousAttempts = [], forceEditMode = false, isDQ = false, nextLifter = null }) {
+export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpdate, previousAttempts = [], forceEditMode = false, isDQ = false, nextLifter = null, readOnly = false }) {
   const [isEditing, setIsEditing] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const inputRef = useRef(null);
@@ -15,8 +15,6 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
   const weight = attempt?.weight || attempt?.requested_weight || '';
   const result = attempt?.result;
   const editCount = attempt?.edit_count || 0;
-  const maxEdits = 3;
-  const editsRemaining = maxEdits - editCount;
 
   // Get previous successful weight for validation (ascending order rule)
   const previousGoodWeights = previousAttempts
@@ -39,20 +37,13 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
   }, [isEditing]);
 
   const handleCellClick = () => {
+    if (readOnly) return;
+
     // In force edit mode, allow editing anything
     if (forceEditMode) {
       if (!isEditing) {
         setIsEditing(true);
       }
-      return;
-    }
-    
-    // Check if the attempt is already completed
-    const isCompleted = result === 'good' || result === 'no-lift';
-    
-    // Check if edits are exhausted (only restrict if it's an ongoing attempt)
-    if (!isCompleted && attempt && editCount >= maxEdits) {
-      toast.error(`Cannot edit: Maximum ${maxEdits} changes allowed per attempt`);
       return;
     }
     
@@ -115,15 +106,10 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
         // Check if weight is actually changing
         const isWeightChanging = weightValue !== (attempt.weight || attempt.requested_weight);
         const newEditCount = isWeightChanging ? editCount + 1 : editCount;
-        
-        // Verify edit limit (unless in force edit mode or if correcting a completed attempt)
-        if (!forceEditMode && !isCompleted && isWeightChanging && newEditCount > maxEdits) {
-          toast.error(`Cannot edit: Maximum ${maxEdits} changes allowed per attempt`);
-          setInputValue(weight || '');
-          setIsEditing(false);
-          return;
-        }
-        
+
+        // The edit count is shown to the admin as information only - it does not
+        // block further edits.
+
         // Update existing attempt
         const updatedAttempt = {
           ...attempt,
@@ -132,15 +118,14 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
           edit_count: (forceEditMode || isCompleted) ? editCount : newEditCount // Don't increment in force edit mode or completed corrections
         };
         await onUpdate(updatedAttempt);
-        
+
         if (isWeightChanging && !forceEditMode && !isCompleted) {
-          const remaining = maxEdits - newEditCount;
-          toast.success(`Weight updated (${remaining} ${remaining === 1 ? 'change' : 'changes'} remaining)`);
+          toast.success(`Weight updated (edit ${newEditCount})`);
         } else if (forceEditMode || isCompleted) {
           toast.success('Weight updated successfully');
         }
       } else {
-        // Create new attempt (first edit = 0)
+        // Create new attempt - the initial weight entry counts as edit #1
         const newAttempt = {
           athlete_id: athlete.id,
           lift_type: attemptType,
@@ -148,7 +133,7 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
           weight: weightValue,
           requested_weight: weightValue,
           result: 'pending',
-          edit_count: 0
+          edit_count: 1
         };
         await onUpdate(newAttempt);
       }
@@ -235,6 +220,24 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
     }
   };
 
+  // Undo an accidental good-lift / no-lift marking, resetting back to pending
+  // so the referee decision can be re-entered.
+  const unmarkResult = async () => {
+    if (!attempt) return;
+
+    const updatedAttempt = {
+      ...attempt,
+      result: 'pending'
+    };
+
+    try {
+      await onUpdate(updatedAttempt);
+      toast.success('Result cleared - back to pending');
+    } catch (error) {
+      console.error('Error unmarking result:', error);
+    }
+  };
+
   const markNotAttempted = async () => {
     const updatedAttempt = attempt 
       ? { ...attempt, result: 'not_attempted', weight: null, requested_weight: null }
@@ -259,9 +262,9 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
 
   const getCellStyle = () => {
     // Check if this is the next lifter's attempt
-    const isNextLifter = nextLifter && 
-      nextLifter.athlete.id === athlete.id && 
-      nextLifter.liftType === attemptType && 
+    const isNextLifter = nextLifter &&
+      nextLifter.athlete.id === athlete.id &&
+      nextLifter.liftType === attemptType &&
       nextLifter.attemptNumber === attemptNumber;
 
     // If this is the next lifter, highlight in blue with blink animation
@@ -291,9 +294,15 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
   };
 
   return (
-    <div 
-      className={`w-full h-full cursor-pointer transition-colors flex items-center justify-center overflow-hidden ${getCellStyle()}`}
+    <div
+      className={`w-full h-full ${readOnly ? '' : 'cursor-pointer'} transition-colors flex items-center justify-center overflow-hidden ${getCellStyle()}`}
       onClick={handleCellClick}
+      style={readOnly ? {
+        width: 'calc(100% - 8px)',
+        height: 'calc(100% - 8px)',
+        margin: '4px',
+        borderRadius: '6px',
+      } : undefined}
     >
       {isEditing ? (
         <input
@@ -322,8 +331,8 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
             </span>
           )}
           
-          {/* Admin decision buttons - only show on hover during pending state */}
-          {result === 'pending' ? (
+          {/* Admin decision buttons - only show on hover during pending state (hidden in readOnly display mode) */}
+          {!readOnly && (result === 'pending' ? (
             <div className="absolute top-1 left-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
               <button
                 onClick={(e) => {
@@ -361,7 +370,7 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
                 </button>
               )}
               {result === 'no-lift' && (
-                <button 
+                <button
                   onClick={(e) => {
                     e.stopPropagation();
                     toggleResult();
@@ -372,14 +381,21 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
                   <Check size={12} strokeWidth={4} />
                 </button>
               )}
-              <button 
+              {(result === 'good' || result === 'no-lift') && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    unmarkResult();
+                  }}
+                  className="w-5 h-5 flex items-center justify-center bg-slate-600 hover:bg-slate-700 text-white rounded shadow-md transition-colors"
+                  title="Unmark (reset to pending)"
+                >
+                  <RotateCcw size={10} strokeWidth={3} />
+                </button>
+              )}
+              <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  // Check if edits are exhausted here as well, so we don't open the input pointlessly
-                  if (!forceEditMode && attempt && editCount >= maxEdits) {
-                    toast.error(`Cannot edit: Maximum ${maxEdits} changes allowed per attempt`);
-                    return;
-                  }
                   setIsEditing(true);
                 }}
                 className="w-5 h-5 flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white rounded shadow-md transition-colors"
@@ -388,7 +404,7 @@ export default function AttemptCell({ athlete, attemptType, attemptNumber, onUpd
                 <Edit2 size={10} strokeWidth={3} />
               </button>
             </div>
-          )}
+          ))}
         </div>
       ) : (
         <div className="w-full h-full flex items-center justify-center group relative">
