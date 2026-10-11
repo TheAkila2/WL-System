@@ -12,6 +12,10 @@ import {
   getSessionAthletes,
   callAthleteToStage,
   clearAthleteCall,
+  startIntervalTimer,
+  stopIntervalTimer,
+  startDefaultScreen,
+  stopDefaultScreen,
 } from '../controllers/session.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { validate } from '../middleware/validator.js';
@@ -45,5 +49,9 @@ router.delete('/:id/attempts/clear', protect, authorize('admin', 'technical'), c
 
 router.post('/:id/call-athlete', protect, authorize('admin', 'technical'), callAthleteToStage);
 router.post('/:id/clear-call', protect, authorize('admin', 'technical'), clearAthleteCall);
+router.post('/:id/interval-timer/start', protect, authorize('admin', 'technical'), startIntervalTimer);
+router.post('/:id/interval-timer/stop', protect, authorize('admin', 'technical'), stopIntervalTimer);
+router.post('/:id/default-screen/start', protect, authorize('admin', 'technical'), startDefaultScreen);
+router.post('/:id/default-screen/stop', protect, authorize('admin', 'technical'), stopDefaultScreen);
 
 export default router;

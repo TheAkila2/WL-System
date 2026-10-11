@@ -500,6 +500,134 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
     </div>
   );
 
+  // Interval / break timer — a 10-minute countdown the Technical Panel can
+  // toggle on/off. While active, the readOnly Scoreboard screen is fully
+  // replaced with a full-screen countdown instead of the attempt grid.
+  const [intervalTimer, setIntervalTimer] = useState(null); // { active, startedAt, durationSeconds }
+  const [intervalTimeRemaining, setIntervalTimeRemaining] = useState(null);
+  // Default screen — a blank white takeover (centered logo) for the Scoreboard
+  // when there's nothing live to show between sessions.
+  const [defaultScreenActive, setDefaultScreenActive] = useState(false);
+
+  const applyIntervalTimer = useCallback((sessionRow) => {
+    if (!sessionRow) return;
+    setIntervalTimer({
+      active: !!sessionRow.interval_timer_active,
+      startedAt: sessionRow.interval_timer_started_at,
+      durationSeconds: sessionRow.interval_timer_duration_seconds || 600,
+    });
+    setDefaultScreenActive(!!sessionRow.default_screen_active);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId) return;
+
+    api.get(`/sessions/${sessionId}`).then((res) => applyIntervalTimer(res.data.data)).catch(() => {});
+
+    const channel = supabase
+      .channel(`sheet-intervaltimer-${sessionId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` },
+        (payload) => applyIntervalTimer(payload.new)
+      )
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  }, [sessionId, applyIntervalTimer]);
+
+  useEffect(() => {
+    if (!intervalTimer?.active || !intervalTimer?.startedAt) {
+      setIntervalTimeRemaining(null);
+      return;
+    }
+    const startedMs = new Date(intervalTimer.startedAt).getTime();
+    const tick = () => {
+      const elapsed = (Date.now() - startedMs) / 1000;
+      setIntervalTimeRemaining(Math.max(0, Math.ceil(intervalTimer.durationSeconds - elapsed)));
+    };
+    tick();
+    const interval = setInterval(tick, 250);
+    return () => clearInterval(interval);
+  }, [intervalTimer]);
+
+  const handleToggleIntervalTimer = async () => {
+    if (!sessionId) return;
+    try {
+      if (intervalTimer?.active) {
+        await api.post(`/sessions/${sessionId}/interval-timer/stop`);
+      } else {
+        await api.post(`/sessions/${sessionId}/interval-timer/start`, { durationSeconds: 600 });
+      }
+    } catch (err) {
+      console.error('Failed to toggle interval timer:', err);
+      toast.error('Failed to toggle interval timer');
+    }
+  };
+
+  const intervalTimerButton = !readOnly && (
+    <button
+      onClick={handleToggleIntervalTimer}
+      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
+        intervalTimer?.active
+          ? 'bg-red-600 hover:bg-red-700 text-white'
+          : 'bg-slate-700 hover:bg-slate-600 text-white'
+      }`}
+      title={intervalTimer?.active ? 'Stop interval timer (Scoreboard returns to normal)' : 'Start 10-minute interval timer (takes over Scoreboard)'}
+    >
+      <Timer size={14} className="shrink-0" />
+      <span className="hidden sm:inline">{intervalTimer?.active ? 'Stop Timer' : '10 Min Timer'}</span>
+    </button>
+  );
+
+  const handleToggleDefaultScreen = async () => {
+    if (!sessionId) return;
+    try {
+      if (defaultScreenActive) {
+        await api.post(`/sessions/${sessionId}/default-screen/stop`);
+      } else {
+        await api.post(`/sessions/${sessionId}/default-screen/start`);
+      }
+    } catch (err) {
+      console.error('Failed to toggle default screen:', err);
+      toast.error('Failed to toggle default screen');
+    }
+  };
+
+  const defaultScreenButton = !readOnly && (
+    <button
+      onClick={handleToggleDefaultScreen}
+      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
+        defaultScreenActive
+          ? 'bg-red-600 hover:bg-red-700 text-white'
+          : 'bg-slate-700 hover:bg-slate-600 text-white'
+      }`}
+      title={defaultScreenActive ? 'Stop default screen (Scoreboard returns to normal)' : 'Show blank default screen on Scoreboard'}
+    >
+      <Monitor size={14} className="shrink-0" />
+      <span className="hidden sm:inline">{defaultScreenActive ? 'Stop Default' : 'Default Screen'}</span>
+    </button>
+  );
+
+  const intervalTimerBadge = !readOnly && intervalTimer?.active && intervalTimeRemaining !== null && (
+    <div
+      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg border text-xs sm:text-sm font-mono font-bold tabular-nums ${
+        intervalTimeRemaining === 0 || intervalTimeRemaining <= 10
+          ? 'bg-red-50 dark:bg-red-950 border-red-300 dark:border-red-600 text-red-600 dark:text-red-400 animate-pulse'
+          : 'bg-slate-50 dark:bg-zinc-800 border-slate-300 dark:border-zinc-600 text-slate-700 dark:text-zinc-200'
+      }`}
+      title="Break timer"
+    >
+      <Timer size={12} className="sm:w-3.5 sm:h-3.5 shrink-0" />
+      <span className="hidden sm:inline">Break</span>
+      <span>
+        {intervalTimeRemaining === 0
+          ? 'TIME'
+          : `${Math.floor(intervalTimeRemaining / 60)}:${String(intervalTimeRemaining % 60).padStart(2, '0')}`}
+      </span>
+    </div>
+  );
+
   // Handle attempt update (from AttemptCell)
   const handleAttemptUpdate = async (attemptData) => {
     try {
@@ -928,6 +1056,68 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
   const thStyle = readOnly ? { backgroundColor: '#1e1b4b', color: '#ffffff', borderColor: '#3730a3' } : undefined;
   const thSubStyle = readOnly ? { backgroundColor: '#312e81', color: '#ffffff', borderColor: '#3730a3' } : undefined;
 
+  // Blank default screen — a plain white takeover with the logo centered,
+  // for use between sessions when there's nothing live to show.
+  if (readOnly && defaultScreenActive) {
+    return (
+      <div className="h-screen w-screen flex items-center justify-center overflow-hidden relative" style={{ backgroundColor: '#ffffff' }}>
+        <img src="/lifting-social-logo.svg" alt="Lifting Social" className="w-48 h-48 sm:w-72 sm:h-72 object-contain" />
+
+        <button
+          onClick={onToggleFullscreen}
+          className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-black/5 hover:bg-black/10 text-slate-700 rounded-lg transition-colors text-sm font-medium opacity-0 hover:opacity-100 focus:opacity-100"
+          title={browserFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          {browserFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          {browserFullscreen ? 'Exit' : 'Full Screen'}
+        </button>
+      </div>
+    );
+  }
+
+  // While the interval timer is running, the Scoreboard screen is fully
+  // replaced with a full-screen countdown instead of the attempt grid.
+  if (readOnly && intervalTimer?.active && intervalTimeRemaining !== null) {
+    const im = Math.floor(intervalTimeRemaining / 60);
+    const is = intervalTimeRemaining % 60;
+    const intervalUrgent = intervalTimeRemaining <= 10;
+    return (
+      <div
+        className="h-screen w-screen flex flex-col items-center justify-center overflow-hidden relative"
+        style={{ backgroundColor: '#000000' }}
+      >
+        <div className="absolute top-6 right-6 w-10 h-10 sm:w-12 sm:h-12 bg-white rounded-lg flex items-center justify-center p-1.5 shadow-lg">
+          <img
+            src="/lifting-social-logo.svg"
+            alt="Lifting Social"
+            className="w-full h-full object-contain"
+          />
+        </div>
+        <div
+          className="font-bold uppercase tracking-[0.3em]"
+          style={{ color: 'rgba(255,255,255,0.6)', fontSize: '2.2vw', marginBottom: '2vh' }}
+        >
+          {intervalTimeRemaining === 0 ? "Time's Up" : 'Break Time'}
+        </div>
+        <div
+          className={`font-black font-mono tabular-nums ${intervalUrgent && intervalTimeRemaining > 0 ? 'animate-pulse' : ''}`}
+          style={{ color: intervalTimeRemaining === 0 || intervalUrgent ? '#dc2626' : '#ffffff', fontSize: '18vw', lineHeight: 1 }}
+        >
+          {String(im).padStart(2, '0')}:{String(is).padStart(2, '0')}
+        </div>
+
+        <button
+          onClick={onToggleFullscreen}
+          className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors text-sm font-medium opacity-0 hover:opacity-100 focus:opacity-100"
+          title={browserFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          {browserFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          {browserFullscreen ? 'Exit' : 'Full Screen'}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className={`${isFullscreen ? 'h-screen w-screen overflow-hidden flex flex-col min-h-0' : 'min-h-screen'} ${readOnly && isFullscreen ? 'bg-slate-950' : 'bg-slate-100 dark:bg-zinc-900'} ${isFullscreen ? 'p-0' : 'p-2'}`}>
       {readOnly && (
@@ -1095,9 +1285,12 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
             />
           </div>
 
-          {!readOnly && callClockBadge && (
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20">
+          {!readOnly && (callClockBadge || intervalTimerBadge || intervalTimerButton || defaultScreenButton) && (
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20 flex items-center gap-2">
               {callClockBadge}
+              {intervalTimerBadge}
+              {intervalTimerButton}
+              {defaultScreenButton}
             </div>
           )}
           {!readOnly && (

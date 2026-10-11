@@ -154,18 +154,18 @@ export default function IntroView() {
   return (
     <div
       className="h-screen w-screen flex flex-col items-center overflow-hidden px-[4vw] py-[4vh]"
-      style={{ background: 'radial-gradient(circle at 50% 30%, #0c3b47 0%, #061a1f 65%)' }}
+      style={{ backgroundColor: '#000000' }}
     >
       {/* Weight class eyebrow */}
       <div className="flex items-center gap-6 shrink-0">
-        <span className="h-px" style={{ width: '6vw', backgroundColor: 'rgba(45,212,191,0.5)' }} />
+        <span className="h-px" style={{ width: '6vw', backgroundColor: 'rgba(255,255,255,0.4)' }} />
         <span
           className="font-bold uppercase tracking-[0.3em]"
           style={{ color: '#ffffff', fontSize: '2vw' }}
         >
           {call.weight_category}KG Class
         </span>
-        <span className="h-px" style={{ width: '6vw', backgroundColor: 'rgba(45,212,191,0.5)' }} />
+        <span className="h-px" style={{ width: '6vw', backgroundColor: 'rgba(255,255,255,0.4)' }} />
       </div>
 
       {/* Athlete identity */}
@@ -207,15 +207,25 @@ export default function IntroView() {
         {timeRemaining !== null && (
           <div
             className={`flex-1 text-center transition-colors ${clockUrgent && timeRemaining > 0 ? 'animate-pulse' : ''}`}
-            style={{ backgroundColor: timeRemaining === 0 || clockUrgent ? '#dc2626' : '#0f766e', padding: '3vh 2vw' }}
+            style={{
+              backgroundColor: timeRemaining === 0 || clockUrgent ? '#dc2626' : '#ffffff',
+              padding: '3vh 2vw',
+            }}
           >
             <div
               className="uppercase tracking-widest"
-              style={{ color: 'rgba(255,255,255,0.7)', fontSize: '1.1vw', marginBottom: '1vh' }}
+              style={{
+                color: timeRemaining === 0 || clockUrgent ? 'rgba(255,255,255,0.8)' : 'rgba(0,0,0,0.5)',
+                fontSize: '1.1vw',
+                marginBottom: '1vh',
+              }}
             >
               Clock
             </div>
-            <div className="font-black font-mono tabular-nums" style={{ color: '#ffffff', fontSize: '7vw' }}>
+            <div
+              className="font-black font-mono tabular-nums"
+              style={{ color: timeRemaining === 0 || clockUrgent ? '#ffffff' : '#000000', fontSize: '7vw' }}
+            >
               {timeRemaining === 0 ? 'TIME' : clockText}
             </div>
           </div>

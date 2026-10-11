@@ -564,3 +564,117 @@ export const clearAthleteCall = async (req, res, next) => {
   }
 };
 
+/**
+ * Start the break/jury interval countdown (default 10 minutes) — takes over
+ * the Scoreboard venue display with a full-screen timer until stopped.
+ * POST /api/sessions/:id/interval-timer/start
+ */
+export const startIntervalTimer = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const duration = Number(req.body?.durationSeconds) || 600;
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({
+        interval_timer_active: true,
+        interval_timer_started_at: new Date().toISOString(),
+        interval_timer_duration_seconds: duration,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    req.app.get('io').emit('interval-timer:started', { session_id: id, durationSeconds: duration });
+
+    res.status(200).json({ success: true, data: session });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Stop the break/jury interval countdown and return the Scoreboard to normal.
+ * POST /api/sessions/:id/interval-timer/stop
+ */
+export const stopIntervalTimer = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({
+        interval_timer_active: false,
+        interval_timer_started_at: null,
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    req.app.get('io').emit('interval-timer:stopped', { session_id: id });
+
+    res.status(200).json({ success: true, data: session });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Show a blank white "default screen" (centered logo) on the Scoreboard venue
+ * display — used between sessions or whenever there's nothing live to show.
+ * POST /api/sessions/:id/default-screen/start
+ */
+export const startDefaultScreen = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({ default_screen_active: true })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    req.app.get('io').emit('default-screen:started', { session_id: id });
+
+    res.status(200).json({ success: true, data: session });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Stop the default screen and return the Scoreboard to normal.
+ * POST /api/sessions/:id/default-screen/stop
+ */
+export const stopDefaultScreen = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({ default_screen_active: false })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    req.app.get('io').emit('default-screen:stopped', { session_id: id });
+
+    res.status(200).json({ success: true, data: session });
+  } catch (error) {
+    next(error);
+  }
+};
+
