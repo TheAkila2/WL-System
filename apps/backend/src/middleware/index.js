@@ -46,10 +46,17 @@ export const setupMiddleware = (app) => {
     );
   }
 
-  // Rate limiting - generous limits for development, skip uploads
+  // Rate limiting. The Technical Panel, Scoreboard, and Intro screens all
+  // poll every few seconds simultaneously during a live competition (session
+  // sheet, call clock, interval timer, active-session follow, etc.), which
+  // adds up to well over 1000 requests per 15 minutes from a single machine
+  // under completely normal use — that's not abuse, it's the app working.
+  // A tripped limiter here fails silently (no error log, since express-rate-
+  // limit responds before reaching our error handler) and looks like random
+  // "call athlete failed" / "weight update didn't save" bugs mid-event.
   const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 1000, // limit each IP to 1000 requests per 15 minutes
+    windowMs: 60 * 1000, // 1 minute
+    max: 1000, // per IP, per minute — generous since this is an internal LAN tool, not public-facing
     message: 'Too many requests from this IP, please try again later.',
     skip: (req) => {
       // Skip rate limit for uploads and health checks
@@ -60,8 +67,11 @@ export const setupMiddleware = (app) => {
     },
     standardHeaders: false, // Don't return rate limit info in headers
     legacyHeaders: false, // Don't return RateLimit-* headers
+    handler: (req, res) => {
+      logger.warn(`Rate limit exceeded: ${req.method} ${req.originalUrl}`);
+      res.status(429).json({ success: false, error: { message: 'Too many requests from this IP, please try again later.' } });
+    },
   });
-  app.use('/api/', limiter);
   app.use('/api/', limiter);
 
   // Health check

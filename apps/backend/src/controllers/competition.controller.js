@@ -213,6 +213,57 @@ export const initializeCompetition = async (req, res, next) => {
 };
 
 /**
+ * Set which session the venue display screens (Scoreboard/Intro/Results)
+ * currently follow. Screens resolve this at runtime via Supabase Realtime
+ * instead of a fixed sessionId baked into their URL, so switching sessions
+ * in the Technical Panel updates every open display screen automatically.
+ */
+export const setActiveSession = async (req, res, next) => {
+  try {
+    const { sessionId } = req.body;
+
+    if (!sessionId) {
+      throw new AppError('sessionId is required', 400);
+    }
+
+    // Resolve the current competition the same way getCurrentCompetition does.
+    let { data: competition, error: findError } = await supabase
+      .from('competitions')
+      .select('id')
+      .eq('status', 'active')
+      .single();
+
+    if (findError || !competition) {
+      const result = await supabase
+        .from('competitions')
+        .select('id')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+      competition = result.data;
+      findError = result.error;
+    }
+
+    if (findError || !competition) {
+      throw new AppError('No competition found', 404);
+    }
+
+    const { data, error } = await supabase
+      .from('competitions')
+      .update({ active_session_id: sessionId })
+      .eq('id', competition.id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * Delete a competition and all associated data
  * (sessions, athletes, attempts, etc.)
  */

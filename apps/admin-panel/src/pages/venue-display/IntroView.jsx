@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams } from 'react-router-dom';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import api from '../../services/api';
 import { supabase } from '../../services/supabaseClient';
+import useActiveSession from '../../hooks/useActiveSession';
 
 const LIFT_LABEL = {
   snatch: 'Snatch',
@@ -13,11 +13,19 @@ const POLL_INTERVAL_MS = 3000;
 const DEFAULT_ATTEMPT_SECONDS = 60;
 
 export default function IntroView() {
-  const { sessionId } = useParams();
+  const { sessionId, loading: activeSessionLoading } = useActiveSession();
   const [call, setCall] = useState(null);
   const [loading, setLoading] = useState(true);
   const [timeRemaining, setTimeRemaining] = useState(null);
   const [browserFullscreen, setBrowserFullscreen] = useState(false);
+  const [intervalTimer, setIntervalTimer] = useState(null); // { active, startedAt, durationSeconds, target }
+  const [intervalTimeRemaining, setIntervalTimeRemaining] = useState(null);
+  const [defaultScreenActive, setDefaultScreenActive] = useState(false);
+  const [defaultScreenTarget, setDefaultScreenTarget] = useState('both');
+  const [defaultScreenVariant, setDefaultScreenVariant] = useState('logo');
+  const [athleteIntroActive, setAthleteIntroActive] = useState(false);
+  const [sessionName, setSessionName] = useState('');
+  const [competitionImageUrl, setCompetitionImageUrl] = useState(null);
   const lastCallAtRef = useRef(null);
 
   useEffect(() => {
@@ -37,6 +45,19 @@ export default function IntroView() {
   };
 
   const applySession = useCallback(async (session) => {
+    setIntervalTimer({
+      active: !!session?.interval_timer_active,
+      startedAt: session?.interval_timer_started_at,
+      durationSeconds: session?.interval_timer_duration_seconds || 600,
+      target: session?.interval_timer_target || 'both',
+    });
+    setDefaultScreenActive(!!session?.default_screen_active);
+    setDefaultScreenTarget(session?.default_screen_target || 'both');
+    setDefaultScreenVariant(session?.default_screen_variant || 'logo');
+    setAthleteIntroActive(!!session?.athlete_intro_active);
+    setSessionName(session?.name || '');
+    setCompetitionImageUrl(session?.competition?.image_url || null);
+
     if (!session?.current_call_athlete_id) {
       lastCallAtRef.current = null;
       setCall(null);
@@ -71,7 +92,12 @@ export default function IntroView() {
   }, []);
 
   const fetchSession = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId) {
+      lastCallAtRef.current = null;
+      setCall(null);
+      setLoading(activeSessionLoading);
+      return;
+    }
     try {
       const res = await api.get(`/sessions/${sessionId}`);
       const session = res.data.data;
@@ -81,7 +107,14 @@ export default function IntroView() {
     } finally {
       setLoading(false);
     }
-  }, [sessionId, applySession]);
+  }, [sessionId, activeSessionLoading, applySession]);
+
+  // Reset immediately when the active session itself changes (not just its
+  // call state), so a stale athlete from the previous session never lingers.
+  useEffect(() => {
+    lastCallAtRef.current = null;
+    setCall(null);
+  }, [sessionId]);
 
   // Initial load + safety-net poll
   useEffect(() => {
@@ -89,6 +122,35 @@ export default function IntroView() {
     const interval = setInterval(fetchSession, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [fetchSession]);
+
+  // Keep the called athlete's best-lift stats live even after the call —
+  // applySession only re-fetches athlete details when current_call_at
+  // changes, so without this a later correction to their totals (e.g. the
+  // operator fixing an attempt after calling them) would never show up here.
+  useEffect(() => {
+    if (!call?.athlete_id) return;
+    const channel = supabase
+      .channel(`venue-intro-athlete-${call.athlete_id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'athletes', filter: `id=eq.${call.athlete_id}` },
+        (payload) => {
+          setCall((prev) =>
+            prev && prev.athlete_id === payload.new.id
+              ? {
+                  ...prev,
+                  best_snatch: payload.new.best_snatch,
+                  best_clean_and_jerk: payload.new.best_clean_and_jerk,
+                  total: payload.new.total,
+                }
+              : prev
+          );
+        }
+      )
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  }, [call?.athlete_id]);
 
   // Instant push via Supabase Realtime
   useEffect(() => {
@@ -102,10 +164,19 @@ export default function IntroView() {
       )
       .subscribe();
 
+    // Lets the Technical Panel's manual Refresh button force this screen to
+    // re-fetch instantly too, without reloading the page (which would drop
+    // it out of browser fullscreen). Shared channel name with SessionSheet.
+    const refreshChannel = supabase
+      .channel(`venue-refresh-${sessionId}`)
+      .on('broadcast', { event: 'force-refresh' }, () => fetchSession())
+      .subscribe();
+
     return () => {
       supabase.removeChannel(channel);
+      supabase.removeChannel(refreshChannel);
     };
-  }, [sessionId, applySession]);
+  }, [sessionId, applySession, fetchSession]);
 
   // Clock countdown — derived purely from the call timestamp so it stays in
   // sync even if this tab reconnects or the realtime push is delayed.
@@ -126,6 +197,22 @@ export default function IntroView() {
     return () => clearInterval(interval);
   }, [call?.called_at, call?.duration_seconds]);
 
+  // Break timer countdown — same mechanism as the call clock above.
+  useEffect(() => {
+    if (!intervalTimer?.active || !intervalTimer?.startedAt) {
+      setIntervalTimeRemaining(null);
+      return;
+    }
+    const startedMs = new Date(intervalTimer.startedAt).getTime();
+    const tick = () => {
+      const elapsed = (Date.now() - startedMs) / 1000;
+      setIntervalTimeRemaining(Math.max(0, Math.ceil(intervalTimer.durationSeconds - elapsed)));
+    };
+    tick();
+    const interval = setInterval(tick, 250);
+    return () => clearInterval(interval);
+  }, [intervalTimer]);
+
   const fullscreenButton = (
     <button
       onClick={handleToggleFullscreen}
@@ -139,6 +226,76 @@ export default function IntroView() {
 
   if (loading) {
     return <FullScreenMessage>Loading…{fullscreenButton}</FullScreenMessage>;
+  }
+
+  if (defaultScreenActive && defaultScreenTarget !== 'scoreboard') {
+    const showImage = defaultScreenVariant === 'image' && competitionImageUrl;
+    return (
+      <div
+        className="h-screen w-screen flex items-center justify-center overflow-hidden relative"
+        style={
+          showImage
+            ? { backgroundImage: `url(${competitionImageUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+            : { backgroundColor: '#ffffff' }
+        }
+      >
+        {showImage ? (
+          <div className="absolute top-6 right-6 z-10 bg-white rounded-xl shadow-xl p-2.5">
+            <img src="/lifting-social-logo.svg" alt="Lifting Social" className="w-12 h-12 sm:w-16 sm:h-16 object-contain" />
+          </div>
+        ) : (
+          <img src="/lifting-social-logo.svg" alt="Lifting Social" className="w-24 h-24 sm:w-36 sm:h-36 object-contain" />
+        )}
+        <button
+          onClick={handleToggleFullscreen}
+          className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-black/5 hover:bg-black/10 text-slate-700 rounded-lg transition-colors text-sm font-medium opacity-0 hover:opacity-100 focus:opacity-100"
+          title={browserFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          {browserFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          {browserFullscreen ? 'Exit' : 'Full Screen'}
+        </button>
+      </div>
+    );
+  }
+
+  if (athleteIntroActive) {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center overflow-hidden relative" style={{ backgroundColor: '#000000' }}>
+        <div className="font-black uppercase tracking-wide text-center" style={{ color: '#ffffff', fontSize: '5vw' }}>
+          Athlete Introduction
+        </div>
+        <div className="font-semibold uppercase tracking-widest text-center" style={{ color: 'rgba(255,255,255,0.5)', fontSize: '2vw', marginTop: '1.5vh' }}>
+          {sessionName}
+        </div>
+        {fullscreenButton}
+      </div>
+    );
+  }
+
+  if (intervalTimer?.active && intervalTimer?.target !== 'scoreboard' && intervalTimeRemaining !== null) {
+    const im = Math.floor(intervalTimeRemaining / 60);
+    const is = intervalTimeRemaining % 60;
+    const intervalUrgent = intervalTimeRemaining <= 10;
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center overflow-hidden relative" style={{ backgroundColor: '#000000' }}>
+        <div className="absolute top-6 right-6 w-10 h-10 sm:w-12 sm:h-12 bg-white rounded-lg flex items-center justify-center p-1.5 shadow-lg">
+          <img src="/lifting-social-logo.svg" alt="Lifting Social" className="w-full h-full object-contain" />
+        </div>
+        <div
+          className="font-bold uppercase tracking-[0.3em]"
+          style={{ color: 'rgba(255,255,255,0.6)', fontSize: '2.2vw', marginBottom: '2vh' }}
+        >
+          {intervalTimeRemaining === 0 ? "Time's Up" : 'Break Time'}
+        </div>
+        <div
+          className={`font-black font-mono tabular-nums ${intervalUrgent && intervalTimeRemaining > 0 ? 'animate-pulse' : ''}`}
+          style={{ color: intervalTimeRemaining === 0 || intervalUrgent ? '#dc2626' : '#ffffff', fontSize: '18vw', lineHeight: 1 }}
+        >
+          {String(im).padStart(2, '0')}:{String(is).padStart(2, '0')}
+        </div>
+        {fullscreenButton}
+      </div>
+    );
   }
 
   if (!call) {

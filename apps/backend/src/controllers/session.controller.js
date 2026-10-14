@@ -573,6 +573,7 @@ export const startIntervalTimer = async (req, res, next) => {
   try {
     const { id } = req.params;
     const duration = Number(req.body?.durationSeconds) || 600;
+    const target = ['scoreboard', 'intro', 'both'].includes(req.body?.target) ? req.body.target : 'both';
 
     const { data: session, error } = await supabase
       .from('sessions')
@@ -580,6 +581,7 @@ export const startIntervalTimer = async (req, res, next) => {
         interval_timer_active: true,
         interval_timer_started_at: new Date().toISOString(),
         interval_timer_duration_seconds: duration,
+        interval_timer_target: target,
       })
       .eq('id', id)
       .select()
@@ -633,10 +635,12 @@ export const stopIntervalTimer = async (req, res, next) => {
 export const startDefaultScreen = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const target = ['scoreboard', 'intro', 'both'].includes(req.body?.target) ? req.body.target : 'both';
+    const variant = ['logo', 'image'].includes(req.body?.variant) ? req.body.variant : 'logo';
 
     const { data: session, error } = await supabase
       .from('sessions')
-      .update({ default_screen_active: true })
+      .update({ default_screen_active: true, default_screen_target: target, default_screen_variant: variant })
       .eq('id', id)
       .select()
       .single();
@@ -671,6 +675,60 @@ export const stopDefaultScreen = async (req, res, next) => {
     if (!session) throw new AppError('Session not found', 404);
 
     req.app.get('io').emit('default-screen:stopped', { session_id: id });
+
+    res.status(200).json({ success: true, data: session });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Manually force the athlete-introduction content onto both the Scoreboard
+ * and Intro venue screens, independent of whether a "call to platform" is
+ * currently active — pins whichever athlete was last called.
+ * POST /api/sessions/:id/athlete-intro/start
+ */
+export const startAthleteIntro = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({ athlete_intro_active: true })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    req.app.get('io').emit('athlete-intro:started', { session_id: id });
+
+    res.status(200).json({ success: true, data: session });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Stop forcing the athlete-introduction content.
+ * POST /api/sessions/:id/athlete-intro/stop
+ */
+export const stopAthleteIntro = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const { data: session, error } = await supabase
+      .from('sessions')
+      .update({ athlete_intro_active: false })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw new AppError(error.message, 400);
+    if (!session) throw new AppError('Session not found', 404);
+
+    req.app.get('io').emit('athlete-intro:stopped', { session_id: id });
 
     res.status(200).json({ success: true, data: session });
   } catch (error) {

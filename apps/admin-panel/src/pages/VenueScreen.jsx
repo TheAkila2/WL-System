@@ -29,12 +29,22 @@ export default function VenueScreen() {
     }
   };
 
-  const handleLaunch = (view) => {
+  const handleLaunch = async (view) => {
     if (!selectedSessionId) {
       toast.error('Please select a session first');
       return;
     }
-    window.open(`/venue-display/${selectedSessionId}/${view}`, '_blank');
+    try {
+      // Mark this session as the one the display screens should follow —
+      // screens resolve this dynamically, so they stay in sync even if the
+      // Technical Panel switches sessions later.
+      await api.post('/competitions/current/active-session', { sessionId: selectedSessionId });
+    } catch (error) {
+      console.error('Failed to activate session for display:', error);
+      toast.error('Failed to activate session for display');
+      return;
+    }
+    window.open(`/venue-display/${view}`, '_blank');
   };
 
   return (

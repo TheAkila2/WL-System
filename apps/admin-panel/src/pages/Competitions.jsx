@@ -18,6 +18,7 @@ export default function Competitions() {
     registration_open: false,
     preliminary_entry_open: false,
     final_entry_open: false,
+    is_published: true,
     image_url: '',
     logo_url: '',
   });
@@ -46,6 +47,7 @@ export default function Competitions() {
           registration_open: data.registration_open || false,
           preliminary_entry_open: data.preliminary_entry_open || false,
           final_entry_open: data.final_entry_open || false,
+          is_published: data.is_published !== false,
           image_url: data.image_url || '',
           logo_url: data.logo_url || '',
         });
@@ -79,6 +81,7 @@ export default function Competitions() {
         registration_open: formData.registration_open,
         preliminary_entry_open: formData.preliminary_entry_open,
         final_entry_open: formData.final_entry_open,
+        is_published: formData.is_published,
         organizer: formData.organizer,
         description: formData.description,
         status: formData.status,
@@ -163,6 +166,7 @@ export default function Competitions() {
         registration_open: competition.registration_open || false,
         preliminary_entry_open: competition.preliminary_entry_open || false,
         final_entry_open: competition.final_entry_open || false,
+        is_published: competition.is_published !== false,
         image_url: competition.image_url || '',
         logo_url: competition.logo_url || '',
       });
@@ -436,6 +440,29 @@ export default function Competitions() {
                 Website Integration (Lifting Social)
               </h3>
               
+              {/* Public Visibility */}
+              <div className="space-y-4 mb-6">
+                <div className="flex items-center justify-between p-4 bg-slate-50 dark:bg-zinc-800/50 rounded-lg">
+                  <div>
+                    <label className="text-sm font-medium text-slate-900 dark:text-white">
+                      Show in Lifting Social Events List
+                    </label>
+                    <p className="text-xs text-slate-600 dark:text-zinc-400 mt-1">
+                      Turn off to hide this competition from the public events page on the website. It stays fully functional for registration links already shared directly.
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={formData.is_published !== false}
+                      onChange={(e) => setFormData({ ...formData, is_published: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-300 dark:bg-zinc-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  </label>
+                </div>
+              </div>
+
               {/* Registration Period */}
               <div className="space-y-4 mb-6">
                 <div className="flex items-center justify-between p-4 bg-slate-50 dark:bg-zinc-800/50 rounded-lg">

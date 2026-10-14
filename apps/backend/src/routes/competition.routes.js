@@ -5,6 +5,7 @@ import {
   updateCurrentCompetition,
   initializeCompetition,
   deleteCompetition,
+  setActiveSession,
 } from '../controllers/competition.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { validate } from '../middleware/validator.js';
@@ -39,6 +40,16 @@ router.put(
   ],
   validate,
   updateCurrentCompetition
+);
+
+// Set which session the venue display screens currently follow
+router.post(
+  '/current/active-session',
+  protect,
+  authorize('admin', 'technical'),
+  [body('sessionId').isUUID()],
+  validate,
+  setActiveSession
 );
 
 // Initialize competition (admin only - one-time setup)

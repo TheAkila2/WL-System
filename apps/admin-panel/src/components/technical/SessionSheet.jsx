@@ -39,6 +39,17 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
 
   const sessionId = session?.id;
 
+  // Whichever session the Technical Panel operator is working on becomes the
+  // one the venue display screens (Scoreboard/Intro/Results) follow — they
+  // no longer hold a fixed sessionId, so this keeps already-open screens in
+  // sync automatically when the operator switches sessions.
+  useEffect(() => {
+    if (readOnly || !sessionId) return;
+    api.post('/competitions/current/active-session', { sessionId }).catch((err) => {
+      console.error('Failed to activate session for display:', err);
+    });
+  }, [readOnly, sessionId]);
+
   const getAthleteTeamCode = (athlete) => {
     const team = athlete?.team || athlete?.teams;
 
@@ -420,11 +431,40 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
       )
       .subscribe();
 
+    // Separate channel just for the Technical Panel's manual Refresh button
+    // to instantly nudge this screen to re-fetch, without reloading the page
+    // (which would drop it out of browser fullscreen). Shared channel name
+    // with IntroView and the sender below.
+    const refreshChannel = supabase
+      .channel(`venue-refresh-${sessionId}`)
+      .on('broadcast', { event: 'force-refresh' }, () => fetchSessionData({ silent: true }))
+      .subscribe();
+
     return () => {
       clearInterval(interval);
       supabase.removeChannel(channel);
+      supabase.removeChannel(refreshChannel);
     };
   }, [readOnly, sessionId, fetchSessionData]);
+
+  // Send-only side of the channel above — fires whenever the Technical Panel
+  // operator clicks Refresh, so already-open Scoreboard/Intro screens follow
+  // instantly instead of waiting for their next 3s poll.
+  const refreshChannelRef = useRef(null);
+  useEffect(() => {
+    if (readOnly || !sessionId) return;
+    const channel = supabase.channel(`venue-refresh-${sessionId}`).subscribe();
+    refreshChannelRef.current = channel;
+    return () => {
+      refreshChannelRef.current = null;
+      supabase.removeChannel(channel);
+    };
+  }, [readOnly, sessionId]);
+
+  const handleManualRefresh = () => {
+    fetchSessionData();
+    refreshChannelRef.current?.send({ type: 'broadcast', event: 'force-refresh', payload: {} });
+  };
 
   // Small "called to platform" clock for the Technical Panel's fullscreen header —
   // mirrors the Intro screen's countdown so the operator can see remaining time
@@ -483,15 +523,13 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
 
   const callClockBadge = !readOnly && callClock && callTimeRemaining !== null && (
     <div
-      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg border text-xs sm:text-sm font-mono font-bold tabular-nums ${
-        callTimeRemaining === 0 || callTimeRemaining <= 10
-          ? 'bg-red-50 dark:bg-red-950 border-red-300 dark:border-red-600 text-red-600 dark:text-red-400 animate-pulse'
-          : 'bg-slate-50 dark:bg-zinc-800 border-slate-300 dark:border-zinc-600 text-slate-700 dark:text-zinc-200'
+      className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 font-mono text-xs sm:text-sm font-bold tabular-nums ${
+        callTimeRemaining === 0 || callTimeRemaining <= 10 ? 'text-red-400 animate-pulse' : 'text-white'
       }`}
       title={`${callClock.athleteName} — called to platform`}
     >
-      <Timer size={12} className="sm:w-3.5 sm:h-3.5 shrink-0" />
-      <span className="hidden sm:inline truncate max-w-[120px]">{callClock.athleteName}</span>
+      <Timer size={13} className="shrink-0" />
+      <span className="hidden sm:inline truncate max-w-[110px] font-sans font-semibold">{callClock.athleteName}</span>
       <span>
         {callTimeRemaining === 0
           ? 'TIME'
@@ -503,11 +541,23 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
   // Interval / break timer — a 10-minute countdown the Technical Panel can
   // toggle on/off. While active, the readOnly Scoreboard screen is fully
   // replaced with a full-screen countdown instead of the attempt grid.
-  const [intervalTimer, setIntervalTimer] = useState(null); // { active, startedAt, durationSeconds }
+  const [intervalTimer, setIntervalTimer] = useState(null); // { active, startedAt, durationSeconds, target }
   const [intervalTimeRemaining, setIntervalTimeRemaining] = useState(null);
+  // Which screen(s) the next "start" action should target — a local UI
+  // selection, not synced; only read at the moment a timer/screen is started.
+  const [intervalTimerTargetSelection, setIntervalTimerTargetSelection] = useState('both');
   // Default screen — a blank white takeover (centered logo) for the Scoreboard
   // when there's nothing live to show between sessions.
   const [defaultScreenActive, setDefaultScreenActive] = useState(false);
+  const [defaultScreenTarget, setDefaultScreenTarget] = useState('both');
+  const [defaultScreenTargetSelection, setDefaultScreenTargetSelection] = useState('both');
+  // Which default screen design to show: plain logo, or the competition's
+  // uploaded image — admin picks before starting it.
+  const [defaultScreenVariant, setDefaultScreenVariant] = useState('logo');
+  const [defaultScreenVariantSelection, setDefaultScreenVariantSelection] = useState('logo');
+  // Athlete Introduction — a static black takeover page for the Scoreboard
+  // and Intro screens, manually toggled (not tied to an actual call event).
+  const [athleteIntroActive, setAthleteIntroActive] = useState(false);
 
   const applyIntervalTimer = useCallback((sessionRow) => {
     if (!sessionRow) return;
@@ -515,8 +565,12 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
       active: !!sessionRow.interval_timer_active,
       startedAt: sessionRow.interval_timer_started_at,
       durationSeconds: sessionRow.interval_timer_duration_seconds || 600,
+      target: sessionRow.interval_timer_target || 'both',
     });
     setDefaultScreenActive(!!sessionRow.default_screen_active);
+    setDefaultScreenTarget(sessionRow.default_screen_target || 'both');
+    setDefaultScreenVariant(sessionRow.default_screen_variant || 'logo');
+    setAthleteIntroActive(!!sessionRow.athlete_intro_active);
   }, []);
 
   useEffect(() => {
@@ -551,13 +605,20 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
     return () => clearInterval(interval);
   }, [intervalTimer]);
 
-  const handleToggleIntervalTimer = async () => {
+  // Shared by both the 10-min and 2-min buttons below — starting one while
+  // the other is running just overrides the duration (the backend always
+  // has at most one interval timer per session), and clicking whichever
+  // duration is currently active stops it.
+  const handleToggleIntervalTimer = async (durationSeconds) => {
     if (!sessionId) return;
     try {
-      if (intervalTimer?.active) {
+      if (intervalTimer?.active && intervalTimer?.durationSeconds === durationSeconds) {
         await api.post(`/sessions/${sessionId}/interval-timer/stop`);
       } else {
-        await api.post(`/sessions/${sessionId}/interval-timer/start`, { durationSeconds: 600 });
+        await api.post(`/sessions/${sessionId}/interval-timer/start`, {
+          durationSeconds,
+          target: intervalTimerTargetSelection,
+        });
       }
     } catch (err) {
       console.error('Failed to toggle interval timer:', err);
@@ -565,20 +626,57 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
     }
   };
 
-  const intervalTimerButton = !readOnly && (
-    <button
-      onClick={handleToggleIntervalTimer}
-      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
-        intervalTimer?.active
-          ? 'bg-red-600 hover:bg-red-700 text-white'
-          : 'bg-slate-700 hover:bg-slate-600 text-white'
-      }`}
-      title={intervalTimer?.active ? 'Stop interval timer (Scoreboard returns to normal)' : 'Start 10-minute interval timer (takes over Scoreboard)'}
+  // Shared "control panel" primitives for the fullscreen header toolbar — one
+  // clearly-grouped dark toolbar with labeled sections, so each control's
+  // purpose and on/off state reads unambiguously at a glance across a venue.
+  const controlButtonClass = (active) =>
+    `flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs sm:text-sm font-semibold whitespace-nowrap transition-colors ${
+      active
+        ? 'bg-red-600 text-white shadow-sm'
+        : 'bg-white/5 text-slate-200 hover:bg-white/10 border border-white/10'
+    }`;
+
+  const screenTargetSelect = (value, onChange, title) => (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      title={title}
+      className="bg-white/5 hover:bg-white/10 text-slate-200 text-xs sm:text-sm rounded-md pl-2 pr-1 py-1.5 border border-white/10 outline-none cursor-pointer"
     >
-      <Timer size={14} className="shrink-0" />
-      <span className="hidden sm:inline">{intervalTimer?.active ? 'Stop Timer' : '10 Min Timer'}</span>
-    </button>
+      <option className="bg-slate-800" value="both">Both Screens</option>
+      <option className="bg-slate-800" value="scoreboard">Scoreboard</option>
+      <option className="bg-slate-800" value="intro">Intro</option>
+    </select>
   );
+
+  const controlGroup = (label, children) => (
+    <div className="flex flex-col items-start gap-1 px-3 py-1.5">
+      <span className="text-[9px] sm:text-[10px] font-bold uppercase tracking-wider text-slate-400 whitespace-nowrap">{label}</span>
+      <div className="flex items-center gap-1.5">{children}</div>
+    </div>
+  );
+
+  const makeIntervalTimerButton = (durationSeconds, label) => {
+    const isThisOneActive = intervalTimer?.active && intervalTimer?.durationSeconds === durationSeconds;
+    return (
+      <button
+        onClick={() => handleToggleIntervalTimer(durationSeconds)}
+        className={controlButtonClass(isThisOneActive)}
+        title={isThisOneActive ? 'Stop interval timer (screens return to normal)' : `Start ${label} interval timer on: ${intervalTimerTargetSelection}`}
+      >
+        <Timer size={14} className="shrink-0" />
+        <span>{isThisOneActive ? 'Stop' : label}</span>
+      </button>
+    );
+  };
+
+  const intervalTimerButton = !readOnly && controlGroup('Timer', (
+    <>
+      {makeIntervalTimerButton(120, '2 Min')}
+      {makeIntervalTimerButton(600, '10 Min')}
+      {screenTargetSelect(intervalTimerTargetSelection, setIntervalTimerTargetSelection, 'Which screen(s) the timer should take over')}
+    </>
+  ));
 
   const handleToggleDefaultScreen = async () => {
     if (!sessionId) return;
@@ -586,7 +684,10 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
       if (defaultScreenActive) {
         await api.post(`/sessions/${sessionId}/default-screen/stop`);
       } else {
-        await api.post(`/sessions/${sessionId}/default-screen/start`);
+        await api.post(`/sessions/${sessionId}/default-screen/start`, {
+          target: defaultScreenTargetSelection,
+          variant: defaultScreenVariantSelection,
+        });
       }
     } catch (err) {
       console.error('Failed to toggle default screen:', err);
@@ -594,32 +695,63 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
     }
   };
 
-  const defaultScreenButton = !readOnly && (
+  const defaultScreenButton = !readOnly && controlGroup('Default Screen', (
+    <>
+      <button
+        onClick={handleToggleDefaultScreen}
+        className={controlButtonClass(defaultScreenActive)}
+        title={defaultScreenActive ? 'Stop default screen (screens return to normal)' : `Show ${defaultScreenVariantSelection} default screen on: ${defaultScreenTargetSelection}`}
+      >
+        <Monitor size={14} className="shrink-0" />
+        <span>{defaultScreenActive ? 'Stop' : 'Show'}</span>
+      </button>
+      <select
+        value={defaultScreenVariantSelection}
+        onChange={(e) => setDefaultScreenVariantSelection(e.target.value)}
+        title="Which design the default screen should use"
+        className="bg-white/5 hover:bg-white/10 text-slate-200 text-xs sm:text-sm rounded-md pl-2 pr-1 py-1.5 border border-white/10 outline-none cursor-pointer"
+      >
+        <option className="bg-slate-800" value="logo">Logo</option>
+        <option className="bg-slate-800" value="image">Competition Image</option>
+      </select>
+      {screenTargetSelect(defaultScreenTargetSelection, setDefaultScreenTargetSelection, 'Which screen(s) the default screen should take over')}
+    </>
+  ));
+
+  const handleToggleAthleteIntro = async () => {
+    if (!sessionId) return;
+    try {
+      if (athleteIntroActive) {
+        await api.post(`/sessions/${sessionId}/athlete-intro/stop`);
+      } else {
+        await api.post(`/sessions/${sessionId}/athlete-intro/start`);
+      }
+    } catch (err) {
+      console.error('Failed to toggle athlete introduction:', err);
+      toast.error('Failed to toggle athlete introduction');
+    }
+  };
+
+  const athleteIntroButton = !readOnly && controlGroup('Athlete Intro', (
     <button
-      onClick={handleToggleDefaultScreen}
-      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
-        defaultScreenActive
-          ? 'bg-red-600 hover:bg-red-700 text-white'
-          : 'bg-slate-700 hover:bg-slate-600 text-white'
-      }`}
-      title={defaultScreenActive ? 'Stop default screen (Scoreboard returns to normal)' : 'Show blank default screen on Scoreboard'}
+      onClick={handleToggleAthleteIntro}
+      className={controlButtonClass(athleteIntroActive)}
+      title={athleteIntroActive ? 'Stop athlete introduction (screens return to normal)' : 'Show athlete introduction on Scoreboard and Intro screens'}
     >
       <Monitor size={14} className="shrink-0" />
-      <span className="hidden sm:inline">{defaultScreenActive ? 'Stop Default' : 'Default Screen'}</span>
+      <span>{athleteIntroActive ? 'Stop' : 'Show'}</span>
     </button>
-  );
+  ));
 
   const intervalTimerBadge = !readOnly && intervalTimer?.active && intervalTimeRemaining !== null && (
     <div
-      className={`flex items-center gap-1.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg border text-xs sm:text-sm font-mono font-bold tabular-nums ${
-        intervalTimeRemaining === 0 || intervalTimeRemaining <= 10
-          ? 'bg-red-50 dark:bg-red-950 border-red-300 dark:border-red-600 text-red-600 dark:text-red-400 animate-pulse'
-          : 'bg-slate-50 dark:bg-zinc-800 border-slate-300 dark:border-zinc-600 text-slate-700 dark:text-zinc-200'
+      className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1 sm:py-1.5 font-mono text-xs sm:text-sm font-bold tabular-nums ${
+        intervalTimeRemaining === 0 || intervalTimeRemaining <= 10 ? 'text-red-400 animate-pulse' : 'text-white'
       }`}
       title="Break timer"
     >
-      <Timer size={12} className="sm:w-3.5 sm:h-3.5 shrink-0" />
-      <span className="hidden sm:inline">Break</span>
+      <Timer size={13} className="shrink-0" />
+      <span className="hidden sm:inline font-sans font-semibold">Break</span>
       <span>
         {intervalTimeRemaining === 0
           ? 'TIME'
@@ -890,15 +1022,10 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
     };
   }, [isFullscreen, athletes]);
 
-  const handleActivateDisplay = () => {
+  const handleActivateDisplay = async () => {
     try {
-      if (socketService) {
-        // Emit explicit switch event
-        socketService.emit('display:switch', { sessionId: session.id });
-        // toast.success('Display screen activated for this session'); // Hidden to reduce notification noise
-      } else {
-        toast.error('Socket service not available');
-      }
+      await api.post('/competitions/current/active-session', { sessionId: session.id });
+      toast.success('Display screens switched to this session');
     } catch (error) {
       console.error('Failed to activate display:', error);
       toast.error('Failed to activate display');
@@ -1058,10 +1185,25 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
 
   // Blank default screen — a plain white takeover with the logo centered,
   // for use between sessions when there's nothing live to show.
-  if (readOnly && defaultScreenActive) {
+  if (readOnly && defaultScreenActive && defaultScreenTarget !== 'intro') {
+    const competitionImageUrl = session?.competition?.image_url;
+    const showImage = defaultScreenVariant === 'image' && competitionImageUrl;
     return (
-      <div className="h-screen w-screen flex items-center justify-center overflow-hidden relative" style={{ backgroundColor: '#ffffff' }}>
-        <img src="/lifting-social-logo.svg" alt="Lifting Social" className="w-48 h-48 sm:w-72 sm:h-72 object-contain" />
+      <div
+        className="h-screen w-screen flex items-center justify-center overflow-hidden relative"
+        style={
+          showImage
+            ? { backgroundImage: `url(${competitionImageUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+            : { backgroundColor: '#ffffff' }
+        }
+      >
+        {showImage ? (
+          <div className="absolute top-6 right-6 z-10 bg-white rounded-xl shadow-xl p-2.5">
+            <img src="/lifting-social-logo.svg" alt="Lifting Social" className="w-12 h-12 sm:w-16 sm:h-16 object-contain" />
+          </div>
+        ) : (
+          <img src="/lifting-social-logo.svg" alt="Lifting Social" className="w-24 h-24 sm:w-36 sm:h-36 object-contain" />
+        )}
 
         <button
           onClick={onToggleFullscreen}
@@ -1075,9 +1217,32 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
     );
   }
 
+  // Athlete Introduction — static black takeover page, manually toggled.
+  if (readOnly && athleteIntroActive) {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center overflow-hidden relative" style={{ backgroundColor: '#000000' }}>
+        <div className="font-black uppercase tracking-wide text-center" style={{ color: '#ffffff', fontSize: '5vw' }}>
+          Athlete Introduction
+        </div>
+        <div className="font-semibold uppercase tracking-widest text-center" style={{ color: 'rgba(255,255,255,0.5)', fontSize: '2vw', marginTop: '1.5vh' }}>
+          {session?.name}
+        </div>
+
+        <button
+          onClick={onToggleFullscreen}
+          className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors text-sm font-medium opacity-0 hover:opacity-100 focus:opacity-100"
+          title={browserFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+        >
+          {browserFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          {browserFullscreen ? 'Exit' : 'Full Screen'}
+        </button>
+      </div>
+    );
+  }
+
   // While the interval timer is running, the Scoreboard screen is fully
   // replaced with a full-screen countdown instead of the attempt grid.
-  if (readOnly && intervalTimer?.active && intervalTimeRemaining !== null) {
+  if (readOnly && intervalTimer?.active && intervalTimer?.target !== 'intro' && intervalTimeRemaining !== null) {
     const im = Math.floor(intervalTimeRemaining / 60);
     const is = intervalTimeRemaining % 60;
     const intervalUrgent = intervalTimeRemaining <= 10;
@@ -1192,6 +1357,15 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
               </span>
             </button>
             <button
+              onClick={handleManualRefresh}
+              disabled={loading}
+              className="flex items-center gap-1 md:gap-2 px-2 md:px-3 lg:px-4 py-1 md:py-2 text-xs md:text-sm bg-slate-100 hover:bg-slate-200 dark:bg-zinc-700 dark:hover:bg-zinc-600 text-slate-800 dark:text-white rounded-lg transition-colors disabled:opacity-50"
+              title="Reload this session's data from the server — use if anything looks stuck or out of date"
+            >
+              <RefreshCw size={12} className={`md:w-4 md:h-4 ${loading ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline text-xs md:text-sm">Refresh</span>
+            </button>
+            <button
               onClick={onToggleFullscreen}
               className="flex items-center gap-1 md:gap-2 px-2 md:px-3 lg:px-4 py-1 md:py-2 text-xs md:text-sm bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg transition-colors"
               title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
@@ -1273,24 +1447,32 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
             )}
           </div>
 
-          <div className={
-            readOnly
-              ? 'hidden md:flex items-center justify-center z-10 shrink-0 bg-white rounded-full shadow-md w-16 h-16 sm:w-20 sm:h-20 p-2'
-              : 'hidden md:flex items-center z-0 shrink-0 pointer-events-none'
-          }>
-            <img
-              src="/lifting-social-logo.svg"
-              alt="Lifting Social"
-              className={readOnly ? 'max-w-full max-h-full object-contain' : 'h-14 sm:h-20'}
-            />
-          </div>
+          {readOnly && (
+            <div className="hidden md:flex items-center justify-center z-10 shrink-0 bg-white rounded-full shadow-md w-16 h-16 sm:w-20 sm:h-20 p-2">
+              <img src="/lifting-social-logo.svg" alt="Lifting Social" className="max-w-full max-h-full object-contain" />
+            </div>
+          )}
 
-          {!readOnly && (callClockBadge || intervalTimerBadge || intervalTimerButton || defaultScreenButton) && (
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20 flex items-center gap-2">
-              {callClockBadge}
-              {intervalTimerBadge}
-              {intervalTimerButton}
-              {defaultScreenButton}
+          {!readOnly && (callClockBadge || intervalTimerBadge || intervalTimerButton || defaultScreenButton || athleteIntroButton) && (
+            <div className="shrink-0 z-20">
+              <div className="flex items-stretch divide-x divide-white/10 rounded-xl bg-slate-900 shadow-xl ring-1 ring-white/10 overflow-hidden">
+                {(callClockBadge || intervalTimerBadge) &&
+                  controlGroup('Live', (
+                    <>
+                      {callClockBadge}
+                      {intervalTimerBadge}
+                    </>
+                  ))}
+                {intervalTimerButton}
+                {defaultScreenButton}
+                {athleteIntroButton}
+              </div>
+            </div>
+          )}
+
+          {!readOnly && (
+            <div className="hidden md:flex items-center z-0 shrink-0 pointer-events-none">
+              <img src="/lifting-social-logo.svg" alt="Lifting Social" className="h-14 sm:h-20" />
             </div>
           )}
           {!readOnly && (
@@ -1392,14 +1574,25 @@ export default function SessionSheet({ session: initialSession, onBack, onToggle
               {browserFullscreen ? 'Exit' : 'Full Screen'}
             </button>
           ) : (
-            <button
-              onClick={onToggleFullscreen}
-              className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg transition-colors text-sm font-medium"
-              title="Exit fullscreen"
-            >
-              <Minimize2 size={16} />
-              Exit
-            </button>
+            <>
+              <button
+                onClick={handleManualRefresh}
+                disabled={loading}
+                className="fixed bottom-4 right-28 z-50 flex items-center gap-2 px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm font-medium disabled:opacity-50"
+                title="Reload this session's data from the server — use if anything looks stuck or out of date"
+              >
+                <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+                Refresh
+              </button>
+              <button
+                onClick={onToggleFullscreen}
+                className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-lg transition-colors text-sm font-medium"
+                title="Exit fullscreen"
+              >
+                <Minimize2 size={16} />
+                Exit
+              </button>
+            </>
           )
         )}
 

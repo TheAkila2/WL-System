@@ -12,6 +12,18 @@ import initializeStorageBuckets from './services/storageSetup.js';
 
 dotenv.config();
 
+// Safety net for live competition use: a single unexpected rejection in a
+// fire-and-forget realtime handler (e.g. a transient network blip talking to
+// Supabase) must never take down the whole server mid-event. Log and keep
+// running instead of crashing — a stuck screen is recoverable, a dead
+// process serving every connected display is not.
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection (server stays up):', reason);
+});
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception (server stays up):', err);
+});
+
 const app = express();
 const httpServer = createServer(app);
 

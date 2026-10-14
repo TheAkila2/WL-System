@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { useParams } from 'react-router-dom';
 import api from '../../services/api';
 import { supabase } from '../../services/supabaseClient';
+import useActiveSession from '../../hooks/useActiveSession';
 
 const MEDAL_STYLE = {
   gold: 'bg-yellow-500 text-black',
@@ -12,13 +12,18 @@ const MEDAL_STYLE = {
 const POLL_INTERVAL_MS = 3000;
 
 export default function ResultsView() {
-  const { sessionId } = useParams();
+  const { sessionId, loading: activeSessionLoading } = useActiveSession();
   const [rows, setRows] = useState([]);
   const [sessionMeta, setSessionMeta] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const loadResults = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId) {
+      setRows([]);
+      setSessionMeta(null);
+      setLoading(activeSessionLoading);
+      return;
+    }
     try {
       const [sessionRes, leaderboardRes] = await Promise.all([
         api.get(`/sessions/${sessionId}`),
@@ -31,7 +36,7 @@ export default function ResultsView() {
     } finally {
       setLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionId, activeSessionLoading]);
 
   // Initial load + safety-net poll
   useEffect(() => {

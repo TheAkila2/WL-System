@@ -81,43 +81,55 @@ const setupGlobalRealtimeSubscriptions = (io) => {
         table: 'attempts',
       },
       async (payload) => {
-        logger.info(`📡 Attempt change detected: ${payload.eventType}`);
-        
-        // Fetch full attempt details with athlete info
-        const { data: attempt, error } = await supabase
-          .from('attempts')
-          .select('*, athlete:athletes(*), session:sessions(*)')
-          .eq('id', payload.new?.id || payload.old?.id)
-          .single();
+        try {
+          logger.info(`📡 Attempt change detected: ${payload.eventType}`);
 
-        if (error) {
-          logger.error('Error fetching attempt details:', error);
-          return;
-        }
-
-        const sessionId = attempt?.session_id || payload.new?.session_id || payload.old?.session_id;
-        
-        if (payload.eventType === 'INSERT') {
-          io.to(`session:${sessionId}`).emit('attempt:created', attempt);
-          logger.info(`✅ Emitted attempt:created to session:${sessionId}`);
-        } else if (payload.eventType === 'UPDATE') {
-          io.to(`session:${sessionId}`).emit('attempt:updated', attempt);
-          
-          // If result changed from pending to good/no-lift, emit validation event
-          if (payload.old?.result === 'pending' && payload.new?.result !== 'pending') {
-            io.to(`session:${sessionId}`).emit('attempt:validated', attempt);
-            logger.info(`✅ Emitted attempt:validated to session:${sessionId} - Result: ${attempt.result}`);
-            
-            // Trigger leaderboard refresh after validation
-            await broadcastLeaderboardUpdate(sessionId, io);
-            
-            // Trigger lifting order update for both lifts
-            await broadcastLiftingOrderUpdate(sessionId, 'snatch');
-            await broadcastLiftingOrderUpdate(sessionId, 'clean_jerk');
+          // Deleted rows no longer exist to query — emit directly from the old
+          // row data instead of re-fetching (which would always 0-match and
+          // log a spurious error on every single delete, e.g. "Clear Attempts").
+          if (payload.eventType === 'DELETE') {
+            const deletedSessionId = payload.old?.session_id;
+            if (deletedSessionId) {
+              io.to(`session:${deletedSessionId}`).emit('attempt:deleted', payload.old);
+            }
+            return;
           }
-        } else if (payload.eventType === 'INSERT') {
-          // When new attempt is declared, update lifting order
-          await broadcastLiftingOrderUpdate(sessionId, attempt.lift_type);
+
+          // Fetch full attempt details with athlete info
+          const { data: attempt, error } = await supabase
+            .from('attempts')
+            .select('*, athlete:athletes(*), session:sessions(*)')
+            .eq('id', payload.new?.id || payload.old?.id)
+            .single();
+
+          if (error) {
+            logger.error('Error fetching attempt details:', error);
+            return;
+          }
+
+          const sessionId = attempt?.session_id || payload.new?.session_id || payload.old?.session_id;
+
+          if (payload.eventType === 'INSERT') {
+            io.to(`session:${sessionId}`).emit('attempt:created', attempt);
+            logger.info(`✅ Emitted attempt:created to session:${sessionId}`);
+          } else if (payload.eventType === 'UPDATE') {
+            io.to(`session:${sessionId}`).emit('attempt:updated', attempt);
+
+            // If result changed from pending to good/no-lift, emit validation event
+            if (payload.old?.result === 'pending' && payload.new?.result !== 'pending') {
+              io.to(`session:${sessionId}`).emit('attempt:validated', attempt);
+              logger.info(`✅ Emitted attempt:validated to session:${sessionId} - Result: ${attempt.result}`);
+
+              // Trigger leaderboard refresh after validation
+              await broadcastLeaderboardUpdate(sessionId, io);
+
+              // Trigger lifting order update for both lifts
+              await broadcastLiftingOrderUpdate(sessionId, 'snatch');
+              await broadcastLiftingOrderUpdate(sessionId, 'clean_jerk');
+            }
+          }
+        } catch (err) {
+          logger.error('Error handling attempt realtime change:', err);
         }
       }
     )
@@ -134,21 +146,25 @@ const setupGlobalRealtimeSubscriptions = (io) => {
         table: 'athletes',
       },
       async (payload) => {
-        logger.info(`📡 Athlete change detected - ID: ${payload.new?.id}`);
-        
-        // Check if best lifts, totals, or rankings changed
-        const oldData = payload.old;
-        const newData = payload.new;
-        
-        const hasSignificantChange = 
-          oldData.best_snatch !== newData.best_snatch ||
-          oldData.best_clean_and_jerk !== newData.best_clean_and_jerk ||
-          oldData.total !== newData.total ||
-          oldData.rank !== newData.rank;
+        try {
+          logger.info(`📡 Athlete change detected - ID: ${payload.new?.id}`);
 
-        if (hasSignificantChange && newData.session_id) {
-          logger.info(`📊 Rankings updated for athlete ${newData.name}`);
-          await broadcastLeaderboardUpdate(newData.session_id, io);
+          // Check if best lifts, totals, or rankings changed
+          const oldData = payload.old;
+          const newData = payload.new;
+
+          const hasSignificantChange =
+            oldData.best_snatch !== newData.best_snatch ||
+            oldData.best_clean_and_jerk !== newData.best_clean_and_jerk ||
+            oldData.total !== newData.total ||
+            oldData.rank !== newData.rank;
+
+          if (hasSignificantChange && newData.session_id) {
+            logger.info(`📊 Rankings updated for athlete ${newData.name}`);
+            await broadcastLeaderboardUpdate(newData.session_id, io);
+          }
+        } catch (err) {
+          logger.error('Error handling athlete realtime change:', err);
         }
       }
     )
@@ -165,17 +181,21 @@ const setupGlobalRealtimeSubscriptions = (io) => {
         table: 'sessions',
       },
       async (payload) => {
-        logger.info(`📡 Session change detected - ID: ${payload.new?.id}`);
-        
-        const { data: session, error } = await supabase
-          .from('sessions')
-          .select('*, competition:competitions(*)')
-          .eq('id', payload.new?.id)
-          .single();
+        try {
+          logger.info(`📡 Session change detected - ID: ${payload.new?.id}`);
 
-        if (!error && session) {
-          io.to(`session:${session.id}`).emit('session:updated', session);
-          logger.info(`✅ Emitted session:updated to session:${session.id}`);
+          const { data: session, error } = await supabase
+            .from('sessions')
+            .select('*, competition:competitions(*)')
+            .eq('id', payload.new?.id)
+            .single();
+
+          if (!error && session) {
+            io.to(`session:${session.id}`).emit('session:updated', session);
+            logger.info(`✅ Emitted session:updated to session:${session.id}`);
+          }
+        } catch (err) {
+          logger.error('Error handling session realtime change:', err);
         }
       }
     )
@@ -192,51 +212,52 @@ const setupGlobalRealtimeSubscriptions = (io) => {
         table: 'weight_change_requests',
       },
       async (payload) => {
-        logger.info(`📡 Weight change detected: ${payload.eventType}`);
-        
-        const weightChangeId = payload.new?.id || payload.old?.id;
-        const sessionId = payload.new?.session_id || payload.old?.session_id;
-        const liftType = payload.new?.lift_type || payload.old?.lift_type;
-        
-        // Fetch full weight change details
-        const { data: weightChange, error } = await supabase
-          .from('weight_change_requests')
-          .select(`
-            *,
-            athlete:athletes(
-              id,
-              name,
-              start_number,
-              country_code,
-              team:teams(name, logo_url)
-            )
-          `)
-          .eq('id', weightChangeId)
-          .single();
+        try {
+          logger.info(`📡 Weight change detected: ${payload.eventType}`);
 
-        if (error) {
-          logger.error('Error fetching weight change details:', error);
-          return;
-        }
+          const weightChangeId = payload.new?.id || payload.old?.id;
+          const sessionId = payload.new?.session_id || payload.old?.session_id;
+          const liftType = payload.new?.lift_type || payload.old?.lift_type;
 
-        if (payload.eventType === 'INSERT') {
-          io.to(`session:${sessionId}`).emit('weightChange:created', weightChange);
-          logger.info(`✅ Emitted weightChange:created to session:${sessionId}`);
-          
-          // Trigger lifting order update for the affected lift type
-          await broadcastLiftingOrderUpdate(sessionId, liftType);
-        } else if (payload.eventType === 'UPDATE') {
-          io.to(`session:${sessionId}`).emit('weightChange:updated', weightChange);
-          logger.info(`✅ Emitted weightChange:updated to session:${sessionId}`);
-          
-          // Trigger lifting order update
-          await broadcastLiftingOrderUpdate(sessionId, liftType);
-        } else if (payload.eventType === 'DELETE') {
-          io.to(`session:${sessionId}`).emit('weightChange:deleted', { id: weightChangeId });
-          logger.info(`✅ Emitted weightChange:deleted to session:${sessionId}`);
-          
-          // Trigger lifting order update
-          await broadcastLiftingOrderUpdate(sessionId, liftType);
+          if (payload.eventType === 'DELETE') {
+            io.to(`session:${sessionId}`).emit('weightChange:deleted', { id: weightChangeId });
+            logger.info(`✅ Emitted weightChange:deleted to session:${sessionId}`);
+            await broadcastLiftingOrderUpdate(sessionId, liftType);
+            return;
+          }
+
+          // Fetch full weight change details
+          const { data: weightChange, error } = await supabase
+            .from('weight_change_requests')
+            .select(`
+              *,
+              athlete:athletes(
+                id,
+                name,
+                start_number,
+                country_code,
+                team:teams(name, logo_url)
+              )
+            `)
+            .eq('id', weightChangeId)
+            .single();
+
+          if (error) {
+            logger.error('Error fetching weight change details:', error);
+            return;
+          }
+
+          if (payload.eventType === 'INSERT') {
+            io.to(`session:${sessionId}`).emit('weightChange:created', weightChange);
+            logger.info(`✅ Emitted weightChange:created to session:${sessionId}`);
+            await broadcastLiftingOrderUpdate(sessionId, liftType);
+          } else if (payload.eventType === 'UPDATE') {
+            io.to(`session:${sessionId}`).emit('weightChange:updated', weightChange);
+            logger.info(`✅ Emitted weightChange:updated to session:${sessionId}`);
+            await broadcastLiftingOrderUpdate(sessionId, liftType);
+          }
+        } catch (err) {
+          logger.error('Error handling weight-change realtime change:', err);
         }
       }
     )

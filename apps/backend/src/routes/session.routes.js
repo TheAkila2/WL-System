@@ -16,6 +16,8 @@ import {
   stopIntervalTimer,
   startDefaultScreen,
   stopDefaultScreen,
+  startAthleteIntro,
+  stopAthleteIntro,
 } from '../controllers/session.controller.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { validate } from '../middleware/validator.js';
@@ -53,5 +55,7 @@ router.post('/:id/interval-timer/start', protect, authorize('admin', 'technical'
 router.post('/:id/interval-timer/stop', protect, authorize('admin', 'technical'), stopIntervalTimer);
 router.post('/:id/default-screen/start', protect, authorize('admin', 'technical'), startDefaultScreen);
 router.post('/:id/default-screen/stop', protect, authorize('admin', 'technical'), stopDefaultScreen);
+router.post('/:id/athlete-intro/start', protect, authorize('admin', 'technical'), startAthleteIntro);
+router.post('/:id/athlete-intro/stop', protect, authorize('admin', 'technical'), stopAthleteIntro);
 
 export default router;

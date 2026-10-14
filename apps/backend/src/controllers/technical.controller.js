@@ -23,32 +23,35 @@ export const getSessionSheet = async (req, res, next) => {
 
     if (athletesError) throw new AppError(athletesError.message, 400);
 
+    // Fetch every attempt for the whole session in one query instead of two
+    // queries per athlete (snatch + clean & jerk) — the previous N+1 pattern
+    // meant a 20-athlete sheet fired 40+ queries on every 3s poll, which is
+    // what caused response times to balloon over the course of a long event.
+    const { data: allAttempts, error: attemptsError } = await db.supabase
+      .from('attempts')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('attempt_number', { ascending: true });
+
+    if (attemptsError) throw new AppError(attemptsError.message, 400);
+
+    const attemptsByAthlete = new Map();
+    for (const attempt of allAttempts || []) {
+      if (!attemptsByAthlete.has(attempt.athlete_id)) {
+        attemptsByAthlete.set(attempt.athlete_id, { snatch: [], clean_jerk: [] });
+      }
+      const bucket = attemptsByAthlete.get(attempt.athlete_id);
+      if (attempt.lift_type === 'snatch') bucket.snatch.push(attempt);
+      else if (attempt.lift_type === 'clean_and_jerk') bucket.clean_jerk.push(attempt);
+    }
+
     // For each athlete, get their snatch and clean_and_jerk attempts
     // Also auto-create first attempts from opening declarations
     const athletesWithAttempts = await Promise.all(
       athletes.map(async (athlete) => {
-        // Get snatch attempts
-        const { data: snatchAttempts, error: snatchError } = await db.supabase
-          .from('attempts')
-          .select('*')
-          .eq('athlete_id', athlete.id)
-          .eq('lift_type', 'snatch')
-          .order('attempt_number', { ascending: true });
-
-        // Get clean and jerk attempts
-        const { data: cleanJerkAttempts, error: cjError } = await db.supabase
-          .from('attempts')
-          .select('*')
-          .eq('athlete_id', athlete.id)
-          .eq('lift_type', 'clean_and_jerk')
-          .order('attempt_number', { ascending: true });
-
-        if (snatchError || cjError) {
-          console.error('Error fetching attempts:', { snatchError, cjError });
-        }
-
-        let finalSnatchAttempts = snatchAttempts || [];
-        let finalCleanJerkAttempts = cleanJerkAttempts || [];
+        const bucket = attemptsByAthlete.get(athlete.id) || { snatch: [], clean_jerk: [] };
+        let finalSnatchAttempts = bucket.snatch;
+        let finalCleanJerkAttempts = bucket.clean_jerk;
 
         // Auto-create first snatch attempt from opening_snatch if it doesn't exist and opening_snatch is set
         if (

@@ -1,4 +1,4 @@
-import { createBrowserRouter, RouterProvider, Routes, Route, Navigate } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './contexts/AuthContext';
 import MobileBlocker from './components/MobileBlocker';
@@ -20,6 +20,12 @@ import SystemSettings from './pages/SystemSettings';
 import Registrations from './pages/Registrations';
 import Layout from './components/Layout';
 
+function LegacyVenueDisplayRedirect() {
+  const { view } = useParams();
+  const target = ['intro', 'scoreboard', 'results'].includes(view) ? view : 'scoreboard';
+  return <Navigate to={`/venue-display/${target}`} replace />;
+}
+
 const router = createBrowserRouter(
   [
     {
@@ -27,11 +33,11 @@ const router = createBrowserRouter(
       element: <LoginPage />,
     },
     {
-      path: '/venue-display/:sessionId',
+      path: '/venue-display',
       element: <Navigate to="scoreboard" replace />,
     },
     {
-      path: '/venue-display/:sessionId/intro',
+      path: '/venue-display/intro',
       element: (
         <ProtectedRoute roles={['admin', 'technical']}>
           <IntroView />
@@ -39,7 +45,7 @@ const router = createBrowserRouter(
       ),
     },
     {
-      path: '/venue-display/:sessionId/scoreboard',
+      path: '/venue-display/scoreboard',
       element: (
         <ProtectedRoute roles={['admin', 'technical']}>
           <ScoreboardView />
@@ -47,12 +53,18 @@ const router = createBrowserRouter(
       ),
     },
     {
-      path: '/venue-display/:sessionId/results',
+      path: '/venue-display/results',
       element: (
         <ProtectedRoute roles={['admin', 'technical']}>
           <ResultsView />
         </ProtectedRoute>
       ),
+    },
+    {
+      // Legacy URLs that still carry a sessionId — the active session is now
+      // resolved server-side, so just drop the stale param and redirect.
+      path: '/venue-display/:sessionId/:view',
+      element: <LegacyVenueDisplayRedirect />,
     },
     {
       path: '/',
